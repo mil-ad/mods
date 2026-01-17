@@ -34,6 +34,7 @@ import (
 	"github.com/charmbracelet/mods/internal/proto"
 	"github.com/charmbracelet/mods/internal/stream"
 	"github.com/charmbracelet/x/exp/ordered"
+	"golang.org/x/term"
 )
 
 type state int
@@ -84,11 +85,19 @@ func newMods(
 	db *convoDB,
 	cache *cache.Conversations,
 ) *Mods {
+	wordWrap := cfg.WordWrap
+	width, height := 0, 0
+	if cfg.DynamicWidth {
+		if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+			wordWrap = w
+			width, height = w, h
+		}
+	}
 	gr, _ := glamour.NewTermRenderer(
 		glamour.WithEnvironmentConfig(),
-		glamour.WithWordWrap(cfg.WordWrap),
+		glamour.WithWordWrap(wordWrap),
 	)
-	vp := viewport.New(0, 0)
+	vp := viewport.New(width, height)
 	vp.GotoBottom()
 	return &Mods{
 		Styles:       makeStyles(r),
@@ -96,11 +105,43 @@ func newMods(
 		state:        startState,
 		renderer:     r,
 		glamViewport: vp,
+		width:        width,
+		height:       height,
 		contentMutex: &sync.Mutex{},
 		db:           db,
 		cache:        cache,
 		Config:       cfg,
 		ctx:          ctx,
+	}
+}
+
+// updateGlamRenderer recreates the glamour renderer with a new word wrap width.
+func (m *Mods) updateGlamRenderer(width int) {
+	gr, _ := glamour.NewTermRenderer(
+		glamour.WithEnvironmentConfig(),
+		glamour.WithWordWrap(width),
+	)
+	m.glam = gr
+}
+
+// reRenderOutput re-renders the current output with the current glamour settings.
+func (m *Mods) reRenderOutput() {
+	if !isOutputTTY() || m.Config.Raw || m.Output == "" {
+		return
+	}
+
+	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
+	m.glamOutput, _ = m.glam.Render(m.Output)
+	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
+	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
+	m.glamHeight = lipgloss.Height(m.glamOutput)
+	m.glamOutput += "\n"
+	truncatedGlamOutput := m.renderer.NewStyle().
+		MaxWidth(m.width).
+		Render(m.glamOutput)
+	m.glamViewport.SetContent(truncatedGlamOutput)
+	if wasAtBottom {
+		m.glamViewport.GotoBottom()
 	}
 }
 
@@ -188,9 +229,14 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.state = errorState
 		return m, m.quit
 	case tea.WindowSizeMsg:
+		oldWidth := m.width
 		m.width, m.height = msg.Width, msg.Height
 		m.glamViewport.Width = m.width
 		m.glamViewport.Height = m.height
+		if m.Config.DynamicWidth && m.width != oldWidth && m.width > 0 {
+			m.updateGlamRenderer(m.width)
+			m.reRenderOutput()
+		}
 		return m, nil
 	case tea.KeyMsg:
 		switch msg.String() {
