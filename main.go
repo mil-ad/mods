@@ -82,11 +82,12 @@ var (
 
 			opts := []tea.ProgramOption{}
 
-			if !isInputTTY() || config.Raw {
+			if config.Raw {
 				opts = append(opts, tea.WithInput(nil))
 			}
 			if isOutputTTY() && !config.Raw {
 				opts = append(opts, tea.WithOutput(os.Stderr))
+				opts = append(opts, tea.WithMouseCellMotion())
 			} else {
 				opts = append(opts, tea.WithoutRenderer())
 			}
