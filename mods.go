@@ -21,6 +21,7 @@ import (
 	"unicode"
 
 	"github.com/caarlos0/go-shellwords"
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -64,9 +65,10 @@ type Mods struct {
 	glamHeight    int
 	messages      []proto.Message
 	cancelRequest []context.CancelFunc
-	anim          tea.Model
-	width         int
-	height        int
+	anim            tea.Model
+	responseSpinner spinner.Model
+	width           int
+	height          int
 
 	db     *convoDB
 	cache  *cache.Conversations
@@ -100,18 +102,19 @@ func newMods(
 	vp := viewport.New(width, height)
 	vp.GotoBottom()
 	return &Mods{
-		Styles:       makeStyles(r),
-		glam:         gr,
-		state:        startState,
-		renderer:     r,
-		glamViewport: vp,
-		width:        width,
-		height:       height,
-		contentMutex: &sync.Mutex{},
-		db:           db,
-		cache:        cache,
-		Config:       cfg,
-		ctx:          ctx,
+		Styles:          makeStyles(r),
+		glam:            gr,
+		state:           startState,
+		renderer:        r,
+		glamViewport:    vp,
+		responseSpinner: newResponseSpinner(r),
+		width:           width,
+		height:          height,
+		contentMutex:    &sync.Mutex{},
+		db:              db,
+		cache:           cache,
+		Config:          cfg,
+		ctx:             ctx,
 	}
 }
 
@@ -218,7 +221,10 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if msg.content != "" {
 			m.appendToOutput(msg.content)
-			m.state = responseState
+			if m.state != responseState {
+				m.state = responseState
+				cmds = append(cmds, m.responseSpinner.Tick)
+			}
 		}
 		cmds = append(cmds, m.receiveCompletionStreamCmd(completionOutput{
 			stream: msg.stream,
@@ -257,11 +263,42 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.glamViewport, cmd = m.glamViewport.Update(msg)
 		cmds = append(cmds, cmd)
 	}
+	if m.state == responseState {
+		var cmd tea.Cmd
+		m.responseSpinner, cmd = m.responseSpinner.Update(msg)
+		cmds = append(cmds, cmd)
+	}
 	return m, tea.Batch(cmds...)
 }
 
 func (m Mods) viewportNeeded() bool {
 	return m.glamHeight > m.height
+}
+
+func newResponseSpinner(r *lipgloss.Renderer) spinner.Model {
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
+	sp.Style = r.NewStyle().Foreground(lipgloss.Color("#6C50FF"))
+	return sp
+}
+
+func (m *Mods) placeSpinnerTopRight(view string) string {
+	if m.width <= 0 {
+		return view
+	}
+	spinnerStr := m.responseSpinner.View()
+	spinnerWidth := lipgloss.Width(spinnerStr)
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return view
+	}
+	firstLineWidth := lipgloss.Width(lines[0])
+	availableWidth := m.width - spinnerWidth
+	if firstLineWidth <= availableWidth {
+		lines[0] = lines[0] + strings.Repeat(" ", availableWidth-firstLineWidth) + spinnerStr
+	} else {
+		lines[0] = m.renderer.NewStyle().MaxWidth(availableWidth).Render(lines[0]) + spinnerStr
+	}
+	return strings.Join(lines, "\n")
 }
 
 // View implements tea.Model.
@@ -276,10 +313,9 @@ func (m *Mods) View() string {
 		}
 	case responseState:
 		if !m.Config.Raw && isOutputTTY() {
-			if m.viewportNeeded() {
-				return m.glamViewport.View()
+			if m.height > 0 {
+				return m.placeSpinnerTopRight(m.glamViewport.View())
 			}
-			// We don't need the viewport yet.
 			return m.glamOutput
 		}
 
