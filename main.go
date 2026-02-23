@@ -80,12 +80,21 @@ var (
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config.Prefix = removeWhitespace(strings.Join(args, " "))
 
+			// Interactive mode forces dynamic width and disables raw
+			if config.Interactive {
+				config.DynamicWidth = true
+				config.Raw = false
+			}
+
 			opts := []tea.ProgramOption{}
 
 			if config.Raw {
 				opts = append(opts, tea.WithInput(nil))
 			}
-			if isOutputTTY() && !config.Raw {
+			if config.Interactive {
+				opts = append(opts, tea.WithAltScreen())
+				opts = append(opts, tea.WithMouseCellMotion())
+			} else if isOutputTTY() && !config.Raw {
 				opts = append(opts, tea.WithOutput(os.Stderr))
 				opts = append(opts, tea.WithMouseCellMotion())
 			} else {
@@ -95,7 +104,7 @@ var (
 				config.Quiet = true
 			}
 
-			if isNoArgs() && isInputTTY() && config.openEditor {
+			if !config.Interactive && isNoArgs() && isInputTTY() && config.openEditor {
 				prompt, err := prefixFromEditor()
 				if err != nil {
 					return err
@@ -103,7 +112,22 @@ var (
 				config.Prefix = prompt
 			}
 
-			if (isNoArgs() || config.AskModel) && isInputTTY() {
+			if !config.Interactive && (isNoArgs() || config.AskModel) && isInputTTY() {
+				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
+					return modsError{
+						err:    err,
+						reason: "User canceled.",
+					}
+				} else if err != nil {
+					return modsError{
+						err:    err,
+						reason: "Prompt failed.",
+					}
+				}
+			}
+
+			// Interactive mode with --ask-model: show model picker before starting
+			if config.Interactive && config.AskModel {
 				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
 					return modsError{
 						err:    err,
@@ -178,7 +202,7 @@ var (
 				return resetSettings()
 			}
 
-			if mods.Input == "" && isNoArgs() {
+			if mods.Input == "" && isNoArgs() && !config.Interactive {
 				return modsError{
 					reason: "You haven't provided any prompt input.",
 					err: newUserErrorf(
@@ -217,6 +241,11 @@ var (
 
 			if config.DeleteOlderThan > 0 {
 				return deleteConversationOlderThan()
+			}
+
+			// Interactive mode handles its own display and saving
+			if config.Interactive {
+				return nil
 			}
 
 			// raw mode already prints the output, no need to print it again
@@ -285,6 +314,7 @@ func initFlags() {
 	flags.BoolVar(&config.ListRoles, "list-roles", config.ListRoles, stdoutStyles().FlagDesc.Render(help["list-roles"]))
 	flags.StringVar(&config.Theme, "theme", "charm", stdoutStyles().FlagDesc.Render(help["theme"]))
 	flags.BoolVarP(&config.openEditor, "editor", "e", false, stdoutStyles().FlagDesc.Render(help["editor"]))
+	flags.BoolVarP(&config.Interactive, "interactive", "i", false, stdoutStyles().FlagDesc.Render(help["interactive"]))
 	flags.BoolVar(&config.MCPList, "mcp-list", false, stdoutStyles().FlagDesc.Render(help["mcp-list"]))
 	flags.BoolVar(&config.MCPListTools, "mcp-list-tools", false, stdoutStyles().FlagDesc.Render(help["mcp-list-tools"]))
 	flags.StringArrayVar(&config.MCPDisable, "mcp-disable", nil, stdoutStyles().FlagDesc.Render(help["mcp-disable"]))

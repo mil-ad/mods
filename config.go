@@ -76,6 +76,7 @@ var help = map[string]string{
 	"mcp-list":          "List all available MCP servers",
 	"mcp-list-tools":    "List all available tools from enabled MCP servers",
 	"mcp-timeout":       "Timeout for MCP server calls, defaults to 15 seconds",
+	"interactive":       "Interactive mode: keep a conversation going in the TUI",
 }
 
 // Model represents the LLM model used in the API call.
@@ -187,6 +188,8 @@ type Config struct {
 	Delete              []string
 	DeleteOlderThan     time.Duration
 	User                string
+
+	Interactive bool
 
 	MCPServers   map[string]MCPServerConfig `yaml:"mcp-servers"`
 	MCPList      bool

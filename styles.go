@@ -24,7 +24,11 @@ type styles struct {
 	Quote,
 	ConversationList,
 	SHA1,
-	Timeago lipgloss.Style
+	Timeago,
+	UserMessage,
+	UserMessageFocused,
+	InputBoxFocused,
+	InputBoxBlurred lipgloss.Style
 }
 
 func makeStyles(r *lipgloss.Renderer) (s styles) {
@@ -46,6 +50,23 @@ func makeStyles(r *lipgloss.Renderer) (s styles) {
 	s.ConversationList = r.NewStyle().Padding(0, 1)
 	s.SHA1 = s.Flag
 	s.Timeago = r.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#999", Dark: "#555"})
+	s.UserMessage = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#555555")).
+		Padding(0, 1)
+	s.UserMessageFocused = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#6C50FF")).
+		Bold(true).
+		Padding(0, 1)
+	s.InputBoxFocused = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#6C50FF")).
+		Padding(0, 1)
+	s.InputBoxBlurred = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#555555")).
+		Padding(0, 1)
 	return s
 }
 
