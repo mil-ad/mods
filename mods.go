@@ -136,7 +136,7 @@ func newMods(
 	if cfg.Interactive {
 		m.textarea = newInteractiveTextarea()
 		if width > 0 {
-			m.textarea.SetWidth(width - 2) //nolint:mnd
+			m.textarea.SetWidth(width - 6) //nolint:mnd
 		}
 	}
 	return m
@@ -356,32 +356,7 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		if msg.seq != m.resizeSeq {
 			return m, nil // stale; a newer resize is pending
 		}
-		// Run the expensive glamour re-render in a background goroutine
-		// so the event loop stays responsive.
-		width := m.width
-		messages := m.messages
-		userStyle := m.Styles.UserMessage
-		userStyleFocused := m.Styles.UserMessageFocused
-		currentMsgIdx := m.currentMsgIdx
-		yankFlashIdx := m.yankFlashIdx
-		seq := m.resizeSeq
-		return m, func() tea.Msg {
-			gr, _ := glamour.NewTermRenderer(
-				glamour.WithEnvironmentConfig(),
-				glamour.WithWordWrap(width),
-			)
-			content, offsets, rawMsgs := renderConversation(
-				messages, gr, userStyle, userStyleFocused,
-				width, currentMsgIdx, yankFlashIdx,
-			)
-			return resizeRenderResult{
-				seq:                 seq,
-				glam:                gr,
-				conversationContent: content,
-				messageOffsets:      offsets,
-				rawMessages:         rawMsgs,
-			}
-		}
+		return m, m.asyncReRenderCmd()
 	case resizeRenderResult:
 		if msg.seq != m.resizeSeq {
 			return m, nil // stale; a newer resize completed
@@ -398,10 +373,14 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		oldWidth := m.width
 		m.width, m.height = msg.Width, msg.Height
 		if m.interactive {
-			m.textarea.SetWidth(m.width - 2) //nolint:mnd
+			m.textarea.SetWidth(m.width - 6) //nolint:mnd
+			m.syncTextareaHeight()
+			// Only update viewport dimensions — skip the expensive
+			// SetContent call. The debounced asyncReRenderCmd will
+			// re-render content with the correct word-wrap width
+			// once resize settles.
 			m.glamViewport.Width = m.width
 			m.glamViewport.Height = m.interactiveViewportHeight()
-			m.updateInteractiveViewport()
 			if m.width != oldWidth && m.width > 0 {
 				// Debounce the expensive glamour re-render so rapid
 				// intermediate resize events (e.g. window manager
@@ -468,7 +447,7 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleBrowseModeKey(msg)
 		}
 		switch msg.String() {
-		case "ctrl+c":
+		case "ctrl+c", "ctrl+d":
 			m.state = doneState
 			return m, m.quit
 		case "esc":
@@ -732,29 +711,8 @@ func (m *Mods) interactiveView() string {
 		}
 
 		var sb strings.Builder
-
-		// If conversation content fits within viewport, render it directly
-		// so the textarea sits just below the content rather than pinned
-		// to the bottom of the screen.
-		contentLines := m.glamViewport.TotalLineCount()
-		if contentLines > 0 && contentLines < vpHeight {
-			sb.WriteString(m.glamViewport.View())
-			// The viewport already pads to vpHeight, but we want the
-			// textarea right after content. Re-render without viewport.
-			sb.Reset()
-			content := m.conversationContent
-			if m.glamOutput != "" {
-				content += m.glamOutput
-			}
-			if content != "" {
-				sb.WriteString(strings.TrimRight(content, "\n"))
-				sb.WriteString("\n\n")
-			}
-		} else {
-			sb.WriteString(m.glamViewport.View())
-			sb.WriteString("\n")
-		}
-
+		sb.WriteString(m.glamViewport.View())
+		sb.WriteString("\n")
 		sb.WriteString(boxStyle.Width(m.width - 4).Render(m.textarea.View())) //nolint:mnd
 
 		return m.padToTermHeight(sb.String())
@@ -797,6 +755,14 @@ func (m *Mods) padToTermHeight(view string) string {
 
 // textareaVisualLineCount returns the number of visual lines the textarea
 // content occupies, accounting for soft wrapping of long lines.
+//
+// The textarea's internal wrap function uses word-wrap with a trailing
+// condition (>=) that can produce more lines than simple character-based
+// division. Additionally, textarea.Update() repositions its internal
+// viewport (scrolling to the cursor) with the OLD height before we can
+// call syncTextareaHeight. Adding a 1-line buffer ensures the textarea
+// always has room for the cursor's next row, avoiding a premature scroll
+// that hides content.
 func (m *Mods) textareaVisualLineCount() int {
 	w := m.textarea.Width()
 	if w <= 0 {
@@ -814,6 +780,7 @@ func (m *Mods) textareaVisualLineCount() int {
 	if total < 1 {
 		total = 1
 	}
+	total++ // buffer line for cursor wrap / word-wrap overshoot
 	return total
 }
 
@@ -822,8 +789,8 @@ func (m *Mods) textareaVisualLineCount() int {
 func (m *Mods) interactiveTextareaHeight() int {
 	const borderLines = 2
 	lines := m.textareaVisualLineCount()
-	// Cap at half the terminal height so the viewport stays usable.
-	maxContent := m.height/2 - borderLines
+	// Cap so total view (viewport + separator + textarea) fits terminal height.
+	maxContent := m.height - borderLines - 2 //nolint:mnd // 2 = separator + min 1 viewport line
 	if maxContent < 1 {
 		maxContent = 1
 	}
@@ -844,7 +811,7 @@ func (m *Mods) syncTextareaHeight() {
 // interactiveViewportHeight calculates the viewport height for interactive mode,
 // reserving space for the textarea and status line.
 func (m *Mods) interactiveViewportHeight() int {
-	vpHeight := m.height - m.interactiveTextareaHeight()
+	vpHeight := m.height - m.interactiveTextareaHeight() - 1 // -1 for separator newline
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -915,6 +882,36 @@ func (m *Mods) reRenderConversation() {
 	m.messageOffsets = offsets
 	m.rawMessages = rawMessages
 	m.updateInteractiveViewport()
+}
+
+// asyncReRenderCmd returns a tea.Cmd that re-renders the conversation with a
+// fresh glamour renderer in a background goroutine, keeping the event loop
+// responsive during terminal resize.
+func (m *Mods) asyncReRenderCmd() tea.Cmd {
+	width := m.width
+	messages := m.messages
+	userStyle := m.Styles.UserMessage
+	userStyleFocused := m.Styles.UserMessageFocused
+	currentMsgIdx := m.currentMsgIdx
+	yankFlashIdx := m.yankFlashIdx
+	seq := m.resizeSeq
+	return func() tea.Msg {
+		gr, _ := glamour.NewTermRenderer(
+			glamour.WithEnvironmentConfig(),
+			glamour.WithWordWrap(width),
+		)
+		content, offsets, rawMsgs := renderConversation(
+			messages, gr, userStyle, userStyleFocused,
+			width, currentMsgIdx, yankFlashIdx,
+		)
+		return resizeRenderResult{
+			seq:                 seq,
+			glam:                gr,
+			conversationContent: content,
+			messageOffsets:      offsets,
+			rawMessages:         rawMsgs,
+		}
+	}
 }
 
 // loadConversationHistory loads and renders existing conversation from cache.
