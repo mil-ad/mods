@@ -811,7 +811,7 @@ func (m *Mods) syncTextareaHeight() {
 // interactiveViewportHeight calculates the viewport height for interactive mode,
 // reserving space for the textarea and status line.
 func (m *Mods) interactiveViewportHeight() int {
-	vpHeight := m.height - m.interactiveTextareaHeight() - 1 // -1 for separator newline
+	vpHeight := m.height - m.interactiveTextareaHeight()
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
