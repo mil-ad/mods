@@ -37,6 +37,8 @@ import (
 	"github.com/charmbracelet/mods/internal/proto"
 	"github.com/charmbracelet/mods/internal/stream"
 	"github.com/charmbracelet/x/exp/ordered"
+	rw "github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
 	"golang.org/x/term"
 )
 
@@ -476,7 +478,10 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if isTerminalNoise(msg) {
 			return m, nil
 		}
-		// Pass key to textarea
+		// Expand textarea height before Update so that repositionView()
+		// inside Update doesn't scroll content off-screen. We set the
+		// correct height afterward in syncTextareaHeight.
+		m.textarea.SetHeight(m.height)
 		var cmd tea.Cmd
 		m.textarea, cmd = m.textarea.Update(msg)
 		cmds = append(cmds, cmd)
@@ -732,7 +737,9 @@ func (m *Mods) padToTermHeight(view string) string {
 }
 
 // textareaVisualLineCount returns the number of visual lines the textarea
-// content occupies, accounting for soft wrapping of long lines.
+// content occupies, accounting for word wrapping. It uses the same wrapping
+// algorithm as the bubbles textarea (see textareaWrap) so that our height
+// calculation matches the textarea's actual rendering exactly.
 // Results are cached and only recalculated when textarea content or width changes.
 func (m *Mods) textareaVisualLineCount() int {
 	w := m.textarea.Width()
@@ -745,12 +752,7 @@ func (m *Mods) textareaVisualLineCount() int {
 	}
 	total := 0
 	for _, line := range strings.Split(val, "\n") {
-		lw := lipgloss.Width(line)
-		if lw == 0 {
-			total++
-		} else {
-			total += lw/w + 1
-		}
+		total += len(textareaWrap([]rune(line), w))
 	}
 	if total < 1 {
 		total = 1
@@ -759,6 +761,70 @@ func (m *Mods) textareaVisualLineCount() int {
 	m.cachedVLCWidth = w
 	m.cachedVLCValue = val
 	return total
+}
+
+// textareaWrap is a direct copy of the unexported wrap() function from
+// github.com/charmbracelet/bubbles/textarea. We replicate it here so that
+// textareaVisualLineCount produces results that exactly match the textarea's
+// internal line wrapping, rather than using an approximation.
+func textareaWrap(runes []rune, width int) [][]rune {
+	var (
+		lines  = [][]rune{{}}
+		word   = []rune{}
+		row    int
+		spaces int
+	)
+
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+
+		if spaces > 0 { //nolint:nestif
+			if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces > width {
+				row++
+				lines = append(lines, []rune{})
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			} else {
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			}
+		} else {
+			lastCharLen := rw.RuneWidth(word[len(word)-1])
+			if uniseg.StringWidth(string(word))+lastCharLen > width {
+				if len(lines[row]) > 0 {
+					row++
+					lines = append(lines, []rune{})
+				}
+				lines[row] = append(lines[row], word...)
+				word = nil
+			}
+		}
+	}
+
+	if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces >= width {
+		lines = append(lines, []rune{})
+		lines[row+1] = append(lines[row+1], word...)
+		spaces++
+		lines[row+1] = append(lines[row+1], repeatSpaces(spaces)...)
+	} else {
+		lines[row] = append(lines[row], word...)
+		spaces++
+		lines[row] = append(lines[row], repeatSpaces(spaces)...)
+	}
+
+	return lines
+}
+
+func repeatSpaces(n int) []rune {
+	return []rune(strings.Repeat(string(' '), n))
 }
 
 // interactiveTextareaHeight returns the total lines consumed by the textarea
@@ -778,9 +844,9 @@ func (m *Mods) interactiveTextareaHeight() int {
 }
 
 // syncTextareaHeight adjusts the textarea's internal height to match its
-// content, then recalculates the viewport height. After resizing, it sends
-// a nil Update to the textarea so its internal viewport repositions the
-// cursor correctly (SetHeight alone doesn't adjust the scroll offset).
+// content, then recalculates the viewport height. The nil Update triggers
+// repositionView inside the textarea — needed after InsertString (paste,
+// newline) which modifies content without calling repositionView.
 func (m *Mods) syncTextareaHeight() {
 	h := m.interactiveTextareaHeight()
 	m.cachedTextareaHeight = h
