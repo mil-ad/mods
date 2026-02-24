@@ -183,9 +183,10 @@ func isTerminalNoise(msg tea.KeyMsg) bool {
 	if len(s) <= 1 {
 		return false
 	}
-	// OSC or CSI fragments contain semicolons, brackets, backslashes
+	// OSC or CSI fragments contain semicolons, brackets, backslashes,
+	// or colons (e.g. OSC 11 color responses like "rgb:0e0e/0e0e/1c1c").
 	for _, c := range s {
-		if c == ';' || c == '[' || c == ']' || c == '\\' || c == '<' || c < 0x20 {
+		if c == ';' || c == '[' || c == ']' || c == '\\' || c == '<' || c == ':' || c < 0x20 {
 			return true
 		}
 	}

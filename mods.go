@@ -63,6 +63,7 @@ type Mods struct {
 	retries       int
 	renderer      *lipgloss.Renderer
 	glam          *glamour.TermRenderer
+	glamStyle     string // resolved glamour style ("dark"/"light"); detected once at startup
 	glamViewport  viewport.Model
 	glamOutput    string
 	glamHeight    int
@@ -91,7 +92,24 @@ type Mods struct {
 	rawMessages         []string
 	currentMsgIdx       int
 	yankFlashIdx        int // user message index whose response is flashing (-1 = none)
-	resizeSeq           int // incremented on each resize; used to debounce glamour re-renders
+	cachedTextareaHeight int    // cached result of interactiveTextareaHeight(); updated by syncTextareaHeight()
+	cachedVLC            int    // cached textareaVisualLineCount result
+	cachedVLCWidth       int    // textarea width used for cachedVLC
+	cachedVLCValue       string // textarea value used for cachedVLC
+}
+
+// resolveGlamourStyle determines the glamour style name once. It respects the
+// GLAMOUR_STYLE env var; otherwise it uses the lipgloss renderer's cached
+// background color detection. This must be called before bubbletea takes over
+// stdin, since the initial detection sends an OSC escape sequence.
+func resolveGlamourStyle() string {
+	if s := os.Getenv("GLAMOUR_STYLE"); s != "" && s != "auto" {
+		return s
+	}
+	if lipgloss.HasDarkBackground() {
+		return "dark"
+	}
+	return "light"
 }
 
 func newMods(
@@ -109,8 +127,12 @@ func newMods(
 			width, height = w, h
 		}
 	}
+	// Detect glamour style once at startup (before bubbletea takes over the
+	// terminal). This calls termenv.HasDarkBackground() which sends an OSC
+	// query — safe here, but must not be repeated during resize.
+	glamStyle := resolveGlamourStyle()
 	gr, _ := glamour.NewTermRenderer(
-		glamour.WithEnvironmentConfig(),
+		glamour.WithStandardStyle(glamStyle),
 		glamour.WithWordWrap(wordWrap),
 	)
 	vp := viewport.New(width, height)
@@ -118,6 +140,7 @@ func newMods(
 	m := &Mods{
 		Styles:          makeStyles(r),
 		glam:            gr,
+		glamStyle:       glamStyle,
 		state:           startState,
 		renderer:        r,
 		glamViewport:    vp,
@@ -138,14 +161,16 @@ func newMods(
 		if width > 0 {
 			m.textarea.SetWidth(width - 6) //nolint:mnd
 		}
+		m.syncTextareaHeight()
 	}
 	return m
 }
 
 // updateGlamRenderer recreates the glamour renderer with a new word wrap width.
+// Uses the style resolved at startup to avoid expensive terminal queries.
 func (m *Mods) updateGlamRenderer(width int) {
 	gr, _ := glamour.NewTermRenderer(
-		glamour.WithEnvironmentConfig(),
+		glamour.WithStandardStyle(m.glamStyle),
 		glamour.WithWordWrap(width),
 	)
 	m.glam = gr
@@ -174,20 +199,6 @@ func (m *Mods) reRenderOutput() {
 
 // clearYankFlashMsg signals that the yank flash highlight should be cleared.
 type clearYankFlashMsg struct{}
-
-// resizeDoneMsg fires after resize events settle, launching the expensive
-// glamour re-render in a background goroutine.
-type resizeDoneMsg struct{ seq int }
-
-// resizeRenderResult carries the result of the background glamour re-render
-// back to the main event loop.
-type resizeRenderResult struct {
-	seq                 int
-	glam                *glamour.TermRenderer
-	conversationContent string
-	messageOffsets      []int
-	rawMessages         []string
-}
 
 // completionInput is a tea.Msg that wraps the content read from stdin.
 type completionInput struct {
@@ -352,45 +363,22 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.yankFlashIdx = -1
 		m.reRenderConversation()
 		return m, nil
-	case resizeDoneMsg:
-		if msg.seq != m.resizeSeq {
-			return m, nil // stale; a newer resize is pending
-		}
-		return m, m.asyncReRenderCmd()
-	case resizeRenderResult:
-		if msg.seq != m.resizeSeq {
-			return m, nil // stale; a newer resize completed
-		}
-		m.glam = msg.glam
-		m.conversationContent = msg.conversationContent
-		m.messageOffsets = msg.messageOffsets
-		m.rawMessages = msg.rawMessages
-		// Re-render streaming output with the new renderer (fast, single message)
-		m.reRenderStreamingOutput()
-		m.updateInteractiveViewport()
-		return m, nil
 	case tea.WindowSizeMsg:
-		oldWidth := m.width
+		oldWidth, oldHeight := m.width, m.height
 		m.width, m.height = msg.Width, msg.Height
+		if m.width == oldWidth && m.height == oldHeight {
+			return m, nil
+		}
 		if m.interactive {
-			m.textarea.SetWidth(m.width - 6) //nolint:mnd
+			if m.width != oldWidth {
+				m.textarea.SetWidth(m.width - 6) //nolint:mnd
+			}
 			m.syncTextareaHeight()
-			// Only update viewport dimensions — skip the expensive
-			// SetContent call. The debounced asyncReRenderCmd will
-			// re-render content with the correct word-wrap width
-			// once resize settles.
 			m.glamViewport.Width = m.width
-			m.glamViewport.Height = m.interactiveViewportHeight()
 			if m.width != oldWidth && m.width > 0 {
-				// Debounce the expensive glamour re-render so rapid
-				// intermediate resize events (e.g. window manager
-				// animations) don't block the event loop.
-				m.resizeSeq++
-				seq := m.resizeSeq
-				return m, tea.Tick(
-					150*time.Millisecond, //nolint:mnd
-					func(time.Time) tea.Msg { return resizeDoneMsg{seq: seq} },
-				)
+				m.updateGlamRenderer(m.width)
+				m.reRenderConversation()
+				m.reRenderStreamingOutput()
 			}
 		} else {
 			m.glamViewport.Width = m.width
@@ -700,10 +688,6 @@ func (m *Mods) interactiveView() string {
 	case doneState:
 		return ""
 	case inputState:
-		vpHeight := m.interactiveViewportHeight()
-		m.glamViewport.Height = vpHeight
-		m.glamViewport.Width = m.width
-
 		// Use focused style when typing, dimmer when in browse mode
 		boxStyle := m.Styles.InputBoxFocused
 		if m.browseMode {
@@ -718,9 +702,6 @@ func (m *Mods) interactiveView() string {
 		return m.padToTermHeight(sb.String())
 
 	case configLoadedState, requestState:
-		vpHeight := m.interactiveViewportHeight()
-		m.glamViewport.Height = vpHeight
-
 		var sb strings.Builder
 		sb.WriteString(m.glamViewport.View())
 		sb.WriteString("\n")
@@ -730,9 +711,6 @@ func (m *Mods) interactiveView() string {
 		return m.padToTermHeight(sb.String())
 
 	case responseState:
-		vpHeight := m.interactiveViewportHeight()
-		m.glamViewport.Height = vpHeight
-
 		return m.padToTermHeight(m.placeSpinnerTopRight(m.glamViewport.View()))
 	}
 	return ""
@@ -755,32 +733,31 @@ func (m *Mods) padToTermHeight(view string) string {
 
 // textareaVisualLineCount returns the number of visual lines the textarea
 // content occupies, accounting for soft wrapping of long lines.
-//
-// The textarea's internal wrap function uses word-wrap with a trailing
-// condition (>=) that can produce more lines than simple character-based
-// division. Additionally, textarea.Update() repositions its internal
-// viewport (scrolling to the cursor) with the OLD height before we can
-// call syncTextareaHeight. Adding a 1-line buffer ensures the textarea
-// always has room for the cursor's next row, avoiding a premature scroll
-// that hides content.
+// Results are cached and only recalculated when textarea content or width changes.
 func (m *Mods) textareaVisualLineCount() int {
 	w := m.textarea.Width()
 	if w <= 0 {
 		return m.textarea.LineCount()
 	}
+	val := m.textarea.Value()
+	if w == m.cachedVLCWidth && val == m.cachedVLCValue && m.cachedVLC > 0 {
+		return m.cachedVLC
+	}
 	total := 0
-	for _, line := range strings.Split(m.textarea.Value(), "\n") {
+	for _, line := range strings.Split(val, "\n") {
 		lw := lipgloss.Width(line)
 		if lw == 0 {
 			total++
 		} else {
-			total += (lw + w - 1) / w
+			total += lw/w + 1
 		}
 	}
 	if total < 1 {
 		total = 1
 	}
-	total++ // buffer line for cursor wrap / word-wrap overshoot
+	m.cachedVLC = total
+	m.cachedVLCWidth = w
+	m.cachedVLCValue = val
 	return total
 }
 
@@ -801,17 +778,25 @@ func (m *Mods) interactiveTextareaHeight() int {
 }
 
 // syncTextareaHeight adjusts the textarea's internal height to match its
-// content, then recalculates the viewport height.
+// content, then recalculates the viewport height. After resizing, it sends
+// a nil Update to the textarea so its internal viewport repositions the
+// cursor correctly (SetHeight alone doesn't adjust the scroll offset).
 func (m *Mods) syncTextareaHeight() {
 	h := m.interactiveTextareaHeight()
+	m.cachedTextareaHeight = h
 	m.textarea.SetHeight(h - 2) //nolint:mnd // subtract border
+	m.textarea, _ = m.textarea.Update(nil)
 	m.glamViewport.Height = m.interactiveViewportHeight()
 }
 
 // interactiveViewportHeight calculates the viewport height for interactive mode,
 // reserving space for the textarea and status line.
 func (m *Mods) interactiveViewportHeight() int {
-	vpHeight := m.height - m.interactiveTextareaHeight()
+	taHeight := m.cachedTextareaHeight
+	if taHeight == 0 {
+		taHeight = m.interactiveTextareaHeight() // fallback before first sync
+	}
+	vpHeight := m.height - taHeight
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -884,35 +869,6 @@ func (m *Mods) reRenderConversation() {
 	m.updateInteractiveViewport()
 }
 
-// asyncReRenderCmd returns a tea.Cmd that re-renders the conversation with a
-// fresh glamour renderer in a background goroutine, keeping the event loop
-// responsive during terminal resize.
-func (m *Mods) asyncReRenderCmd() tea.Cmd {
-	width := m.width
-	messages := m.messages
-	userStyle := m.Styles.UserMessage
-	userStyleFocused := m.Styles.UserMessageFocused
-	currentMsgIdx := m.currentMsgIdx
-	yankFlashIdx := m.yankFlashIdx
-	seq := m.resizeSeq
-	return func() tea.Msg {
-		gr, _ := glamour.NewTermRenderer(
-			glamour.WithEnvironmentConfig(),
-			glamour.WithWordWrap(width),
-		)
-		content, offsets, rawMsgs := renderConversation(
-			messages, gr, userStyle, userStyleFocused,
-			width, currentMsgIdx, yankFlashIdx,
-		)
-		return resizeRenderResult{
-			seq:                 seq,
-			glam:                gr,
-			conversationContent: content,
-			messageOffsets:      offsets,
-			rawMessages:         rawMsgs,
-		}
-	}
-}
 
 // loadConversationHistory loads and renders existing conversation from cache.
 func (m *Mods) loadConversationHistory() {
