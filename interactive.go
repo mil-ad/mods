@@ -100,7 +100,7 @@ func renderConversation(
 			if glam != nil {
 				glamRendered, err := glam.Render(msg.Content)
 				if err == nil {
-					glamRendered = strings.TrimFunc(glamRendered, func(r rune) bool {
+					glamRendered = strings.TrimRightFunc(glamRendered, func(r rune) bool {
 						return r == '\n' || r == '\r' || r == ' ' || r == '\t'
 					})
 					glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))

@@ -703,23 +703,29 @@ func (m *Mods) interactiveView() string {
 		}
 
 		var sb strings.Builder
-		sb.WriteString(m.glamViewport.View())
-		sb.WriteString("\n")
+		// Trim viewport padding so the textarea sits directly below
+		// conversation content instead of being pinned to the bottom.
+		if vp := trimViewportBottom(m.glamViewport.View()); vp != "" {
+			sb.WriteString(vp)
+			sb.WriteString("\n\n") // blank separator line
+		}
 		sb.WriteString(boxStyle.Width(m.width - 4).Render(m.textarea.View())) //nolint:mnd
 
 		return m.padToTermHeight(sb.String())
 
 	case configLoadedState, requestState:
 		var sb strings.Builder
-		sb.WriteString(m.glamViewport.View())
-		sb.WriteString("\n")
+		if vp := trimViewportBottom(m.glamViewport.View()); vp != "" {
+			sb.WriteString(vp)
+			sb.WriteString("\n")
+		}
 		if !m.Config.Quiet {
 			sb.WriteString(m.anim.View())
 		}
 		return m.padToTermHeight(sb.String())
 
 	case responseState:
-		return m.padToTermHeight(m.placeSpinnerTopRight(m.glamViewport.View()))
+		return m.padToTermHeight(m.placeSpinnerTopRight(trimViewportBottom(m.glamViewport.View())))
 	}
 	return ""
 }
@@ -737,6 +743,19 @@ func (m *Mods) padToTermHeight(view string) string {
 		view += strings.Repeat("\n", m.height-n)
 	}
 	return view
+}
+
+// trimViewportBottom removes trailing empty lines from a viewport's rendered
+// output so that elements placed after it sit directly below the content.
+func trimViewportBottom(view string) string {
+	lines := strings.Split(view, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
 }
 
 // textareaVisualLineCount returns the number of visual lines the textarea
@@ -886,7 +905,7 @@ func (m *Mods) appendResponseToConversation() {
 	if m.glam != nil {
 		glamRendered, err := m.glam.Render(m.Output)
 		if err == nil {
-			glamRendered = strings.TrimFunc(glamRendered, unicode.IsSpace)
+			glamRendered = strings.TrimRightFunc(glamRendered, unicode.IsSpace)
 			glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
 			m.conversationContent += glamRendered + "\n\n"
 			m.updateInteractiveViewport()
