@@ -441,14 +441,17 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = doneState
 			return m, m.quit
 		case "esc":
+			// No conversation yet: quit the app
+			if len(m.messageOffsets) == 0 {
+				m.state = doneState
+				return m, m.quit
+			}
 			m.browseMode = true
 			m.textarea.Blur()
 			// Start at the last user message and scroll to it
-			if len(m.messageOffsets) > 0 {
-				m.currentMsgIdx = len(m.messageOffsets) - 1
-				m.reRenderConversation()
-				m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
-			}
+			m.currentMsgIdx = len(m.messageOffsets) - 1
+			m.reRenderConversation()
+			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
 			return m, nil
 		case "ctrl+v", "alt+v":
 			// Paste from clipboard directly so we can sync textarea height
