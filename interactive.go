@@ -47,82 +47,121 @@ func newInteractiveTextarea() textarea.Model {
 
 // renderUserMessage wraps user text in a styled bordered box.
 func renderUserMessage(content string, style lipgloss.Style, width int) string {
-	if width > 4 { //nolint:mnd
-		style = style.Width(width - 4) //nolint:mnd
+	if width > 2 { //nolint:mnd
+		style = style.Width(width - 2) //nolint:mnd
 	}
 	return style.Render(strings.TrimSpace(content))
 }
 
 // renderConversation renders the full conversation history with styled user
 // messages and glamour-rendered AI responses. Returns the rendered content,
-// line offsets for each user message, and the raw text of each user message.
-// highlightIdx is the index of the user message to highlight (-1 for none).
-// yankFlashIdx is the user message index whose assistant response should flash (-1 for none).
+// line offsets for each message, raw text, and roles.
+// highlightIdx is the index of the message to highlight (-1 for none).
+// yankFlashIdx is the message index to flash (-1 for none).
 func renderConversation(
 	messages []proto.Message,
 	glam *glamour.TermRenderer,
 	userStyle lipgloss.Style,
 	userStyleFocused lipgloss.Style,
+	assistantStyleFocused lipgloss.Style,
 	width int,
 	highlightIdx int,
 	yankFlashIdx int,
-) (content string, offsets []int, rawMessages []string) {
+) (content string, offsets []int, rawMessages []string, roles []string) {
 	var sb strings.Builder
-	// markers tracks the byte position in the builder where each user message starts.
+	// markers tracks the byte position in the builder where each message starts.
 	var markers []int
-	userIdx := 0
-	// lastUserIdx tracks the user message index of the most recently seen user message,
-	// so we can match assistant responses to the preceding user message.
-	lastUserIdx := -1
 
+	// Collect visible messages so we can peek ahead for spacing decisions.
+	type visibleMsg struct {
+		msg proto.Message
+		idx int // combined message index
+	}
+	var visible []visibleMsg
+	idx := 0
 	for _, msg := range messages {
 		if msg.Content == "" {
 			continue
 		}
+		if msg.Role == proto.RoleSystem {
+			continue
+		}
+		visible = append(visible, visibleMsg{msg, idx})
+		idx++
+	}
 
-		switch msg.Role {
+	for vi, vm := range visible {
+		switch vm.msg.Role {
 		case proto.RoleUser:
 			markers = append(markers, sb.Len())
-			rawMessages = append(rawMessages, msg.Content)
+			rawMessages = append(rawMessages, vm.msg.Content)
+			roles = append(roles, proto.RoleUser)
 
 			style := userStyle
-			if userIdx == highlightIdx {
+			if vm.idx == highlightIdx {
 				style = userStyleFocused
 			}
-			rendered := renderUserMessage(msg.Content, style, width)
+			rendered := renderUserMessage(vm.msg.Content, style, width)
+			flashing := vm.idx == yankFlashIdx && yankFlashIdx >= 0
+			if flashing {
+				rendered = flashLines(rendered, width)
+			}
 			sb.WriteString(rendered)
-			sb.WriteString("\n")
-			lastUserIdx = userIdx
-			userIdx++
+			// Blank line after user message, unless the next message is
+			// a highlighted assistant (its border top replaces the gap).
+			nextIsHighlightedAssistant := vi+1 < len(visible) &&
+				visible[vi+1].msg.Role == proto.RoleAssistant &&
+				visible[vi+1].idx == highlightIdx
+			if nextIsHighlightedAssistant {
+				sb.WriteString("\n")
+			} else {
+				sb.WriteString("\n\n")
+			}
 
 		case proto.RoleAssistant:
-			flashing := lastUserIdx == yankFlashIdx && yankFlashIdx >= 0
+			markers = append(markers, sb.Len())
+			rawMessages = append(rawMessages, vm.msg.Content)
+			roles = append(roles, proto.RoleAssistant)
+
+			highlighted := vm.idx == highlightIdx
+			flashing := vm.idx == yankFlashIdx && yankFlashIdx >= 0
 			if glam != nil {
-				glamRendered, err := glam.Render(msg.Content)
+				glamRendered, err := glam.Render(vm.msg.Content)
 				if err == nil {
 					glamRendered = strings.TrimFunc(glamRendered, func(r rune) bool {
 						return r == '\n' || r == '\r' || r == ' ' || r == '\t'
 					})
 					glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
+					if highlighted {
+						glamRendered = renderAssistantFocused(glamRendered, assistantStyleFocused, width)
+					}
 					if flashing {
 						glamRendered = flashLines(glamRendered, width)
 					}
 					sb.WriteString(glamRendered)
-					sb.WriteString("\n\n")
+					// Border bottom replaces blank line when highlighted.
+					if highlighted {
+						sb.WriteString("\n")
+					} else {
+						sb.WriteString("\n\n")
+					}
 					continue
 				}
 			}
 			// Fallback: render as plain text
-			txt := msg.Content
+			txt := vm.msg.Content
+			if highlighted {
+				txt = renderAssistantFocused(txt, assistantStyleFocused, width)
+			}
 			if flashing {
 				txt = flashLines(txt, width)
 			}
 			sb.WriteString(txt)
-			sb.WriteString("\n\n")
-
-		case proto.RoleSystem:
-			// Skip system messages in the display
-			continue
+			if highlighted {
+				sb.WriteString("\n")
+			} else {
+				sb.WriteString("\n\n")
+			}
 		}
 	}
 
@@ -133,15 +172,32 @@ func renderConversation(
 		offsets = append(offsets, strings.Count(content[:pos], "\n"))
 	}
 
-	return content, offsets, rawMessages
+	return content, offsets, rawMessages, roles
+}
+
+// renderAssistantFocused wraps assistant content in a border, reusing the
+// leading space glamour adds to each line for the left border character.
+func renderAssistantFocused(content string, style lipgloss.Style, width int) string {
+	// Strip 1 leading space per line so the left border character
+	// consumes it. The right border consumes 1 trailing space via
+	// the reduced content width.
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		lines[i] = trimLeadingVisibleSpaces(line, 1)
+	}
+	content = strings.Join(lines, "\n")
+	if width > 2 { //nolint:mnd
+		style = style.Width(width - 2) //nolint:mnd
+	}
+	return style.Render(content)
 }
 
 // flashLines applies a background highlight to text that contains ANSI codes
 // (e.g. glamour output) by injecting the background color after every ANSI
 // reset and padding each line to fill the terminal width.
 func flashLines(text string, width int) string {
-	// Background color for the flash: a visible purple (#463770).
-	const bgCode = "\x1b[48;2;70;55;112m"
+	// Background color for the flash: a dim yellow/gold (#4A4000).
+	const bgCode = "\x1b[48;2;74;64;0m"
 	lines := strings.Split(text, "\n")
 	for i, line := range lines {
 		// Re-inject background after any full ANSI reset so the
@@ -154,6 +210,33 @@ func flashLines(text string, width int) string {
 		lines[i] = bgCode + line + strings.Repeat(" ", pad) + "\x1b[0m"
 	}
 	return strings.Join(lines, "\n")
+}
+
+// trimLeadingVisibleSpaces strips up to n visible space characters from the
+// start of a line, skipping over any ANSI escape sequences.
+func trimLeadingVisibleSpaces(line string, n int) string {
+	b := []byte(line)
+	i := 0
+	stripped := 0
+	for i < len(b) && stripped < n {
+		if b[i] == '\x1b' && i+1 < len(b) && b[i+1] == '[' {
+			// Skip CSI sequence: ESC [ ... final_byte
+			j := i + 2 //nolint:mnd
+			for j < len(b) && b[j] != 'm' {
+				j++
+			}
+			if j < len(b) {
+				j++ // skip 'm'
+			}
+			i = j
+		} else if b[i] == ' ' {
+			b = append(b[:i], b[i+1:]...)
+			stripped++
+		} else {
+			break
+		}
+	}
+	return string(b)
 }
 
 // copyToClipboard copies text to the clipboard. When joinLines is true,

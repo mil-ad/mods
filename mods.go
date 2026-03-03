@@ -93,8 +93,9 @@ type Mods struct {
 	conversationContent string
 	messageOffsets      []int
 	rawMessages         []string
+	messageRoles        []string
 	currentMsgIdx       int
-	yankFlashIdx        int  // user message index whose response is flashing (-1 = none)
+	yankFlashIdx        int  // index of the message being flash-highlighted (-1 = none)
 	browsePendingG      bool // true after pressing 'g' in browse mode, waiting for second key
 	cachedTextareaHeight int    // cached result of interactiveTextareaHeight(); updated by syncTextareaHeight()
 	cachedVLC            int    // cached textareaVisualLineCount result
@@ -468,7 +469,7 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			m.browseMode = true
 			m.textarea.Blur()
-			// Start at the last user message and scroll to it
+			// Start at the last message and scroll to it
 			m.currentMsgIdx = len(m.messageOffsets) - 1
 			m.reRenderConversation()
 			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
@@ -582,41 +583,32 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.browsePendingG = false
 		return m, nil
-	case "n", "p":
+	case "n", "N":
 		m.browsePendingG = false
-		if len(m.messageOffsets) == 0 {
+		if len(m.messageOffsets) == 0 || m.currentMsgIdx >= len(m.messageOffsets)-1 {
 			return m, nil
 		}
 		m.currentMsgIdx++
-		if m.currentMsgIdx >= len(m.messageOffsets) {
-			m.currentMsgIdx = 0
-		}
 		m.reRenderConversation()
-		if m.currentMsgIdx == 0 {
-			m.glamViewport.GotoTop()
-		} else if m.currentMsgIdx < len(m.messageOffsets) {
-			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
-		}
+		m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
 		return m, nil
-	case "N", "P":
+	case "p", "P":
 		m.browsePendingG = false
-		if len(m.messageOffsets) == 0 {
+		if len(m.messageOffsets) == 0 || m.currentMsgIdx <= 0 {
 			return m, nil
 		}
 		m.currentMsgIdx--
-		if m.currentMsgIdx < 0 {
-			m.currentMsgIdx = len(m.messageOffsets) - 1
-		}
 		m.reRenderConversation()
 		if m.currentMsgIdx == 0 {
 			m.glamViewport.GotoTop()
-		} else if m.currentMsgIdx < len(m.messageOffsets) {
+		} else {
 			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
 		}
 		return m, nil
 	case "y":
 		m.browsePendingG = false
-		if raw := m.responseForUserMessage(m.currentMsgIdx); raw != "" {
+		if m.currentMsgIdx >= 0 && m.currentMsgIdx < len(m.rawMessages) {
+			raw := m.rawMessages[m.currentMsgIdx]
 			m.yankFlashIdx = m.currentMsgIdx
 			m.reRenderConversation()
 			return m, tea.Batch(
@@ -629,7 +621,8 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case "Y":
 		m.browsePendingG = false
-		if raw := m.responseForUserMessage(m.currentMsgIdx); raw != "" {
+		if m.currentMsgIdx >= 0 && m.currentMsgIdx < len(m.rawMessages) {
+			raw := m.rawMessages[m.currentMsgIdx]
 			m.yankFlashIdx = m.currentMsgIdx
 			m.reRenderConversation()
 			return m, tea.Batch(
@@ -764,6 +757,7 @@ func (m *Mods) switchConversation() (tea.Model, tea.Cmd) {
 		m.conversationContent = ""
 		m.messageOffsets = nil
 		m.rawMessages = nil
+		m.messageRoles = nil
 		m.glamOutput = ""
 		m.Output = ""
 		m.updateInteractiveViewport()
@@ -780,6 +774,7 @@ func (m *Mods) switchConversation() (tea.Model, tea.Cmd) {
 	m.conversationContent = ""
 	m.messageOffsets = nil
 	m.rawMessages = nil
+	m.messageRoles = nil
 	m.glamOutput = ""
 	m.Output = ""
 	m.loadConversationHistory()
@@ -891,35 +886,20 @@ func (m *Mods) renderHistoryList() string {
 	return sb.String()
 }
 
-// responseForUserMessage returns the assistant response that follows the Nth
-// user message (0-indexed). Returns empty string if not found.
-func (m *Mods) responseForUserMessage(userIdx int) string {
-	if userIdx < 0 {
-		return ""
-	}
-	currentUser := 0
-	for i, msg := range m.messages {
-		if msg.Role == proto.RoleUser && msg.Content != "" {
-			if currentUser == userIdx {
-				// Found the target user message; return the next assistant response.
-				for j := i + 1; j < len(m.messages); j++ {
-					if m.messages[j].Role == proto.RoleAssistant && m.messages[j].Content != "" {
-						return m.messages[j].Content
-					}
-				}
-				return ""
-			}
-			currentUser++
-		}
-	}
-	return ""
-}
 
 func (m Mods) viewportNeeded() bool {
 	if m.interactive {
 		return m.glamHeight > m.interactiveViewportHeight()
 	}
 	return m.glamHeight > m.height
+}
+
+// lastMessageIsHighlightedAssistant reports whether the currently selected
+// browse-mode message is an assistant response AND is the last message.
+func (m *Mods) lastMessageIsHighlightedAssistant() bool {
+	last := len(m.messageRoles) - 1
+	return m.currentMsgIdx >= 0 && m.currentMsgIdx == last &&
+		last < len(m.messageRoles) && m.messageRoles[last] == proto.RoleAssistant
 }
 
 func newResponseSpinner(r *lipgloss.Renderer) spinner.Model {
@@ -1013,9 +993,15 @@ func (m *Mods) interactiveView() string {
 		// conversation content instead of being pinned to the bottom.
 		if vp := trimViewportBottom(m.glamViewport.View()); vp != "" {
 			sb.WriteString(vp)
-			sb.WriteString("\n\n") // blank separator line
+			// When the last message is a highlighted assistant, the border
+			// bottom already separates content from the input box.
+			if m.browseMode && m.lastMessageIsHighlightedAssistant() {
+				sb.WriteString("\n")
+			} else {
+				sb.WriteString("\n\n") // blank separator line
+			}
 		}
-		sb.WriteString(boxStyle.Width(m.width - 4).Render(m.textarea.View())) //nolint:mnd
+		sb.WriteString(boxStyle.Width(m.width - 2).Render(m.textarea.View())) //nolint:mnd
 
 		return m.padToTermHeight(sb.String())
 
@@ -1203,12 +1189,19 @@ func (m *Mods) appendUserMessageToConversation(content string) {
 	rendered := renderUserMessage(content, m.Styles.UserMessage, m.width)
 	m.messageOffsets = append(m.messageOffsets, strings.Count(m.conversationContent, "\n"))
 	m.rawMessages = append(m.rawMessages, content)
+	m.messageRoles = append(m.messageRoles, proto.RoleUser)
 	m.conversationContent += rendered + "\n"
 	m.updateInteractiveViewport()
 }
 
 // appendResponseToConversation adds the completed AI response to the conversation.
 func (m *Mods) appendResponseToConversation() {
+	// Add blank line between user message and response (kept out of
+	// appendUserMessageToConversation so streaming has no extra gap).
+	m.conversationContent += "\n"
+	m.messageOffsets = append(m.messageOffsets, strings.Count(m.conversationContent, "\n"))
+	m.rawMessages = append(m.rawMessages, m.Output)
+	m.messageRoles = append(m.messageRoles, proto.RoleAssistant)
 	if m.glam != nil {
 		glamRendered, err := m.glam.Render(m.Output)
 		if err == nil {
@@ -1253,14 +1246,16 @@ func (m *Mods) reRenderStreamingOutput() {
 
 // reRenderConversation re-renders the entire conversation after a terminal resize or highlight change.
 func (m *Mods) reRenderConversation() {
-	content, offsets, rawMessages := renderConversation(
+	content, offsets, rawMessages, roles := renderConversation(
 		m.messages, m.glam,
 		m.Styles.UserMessage, m.Styles.UserMessageFocused,
+		m.Styles.AssistantMessageFocused,
 		m.width, m.currentMsgIdx, m.yankFlashIdx,
 	)
 	m.conversationContent = content
 	m.messageOffsets = offsets
 	m.rawMessages = rawMessages
+	m.messageRoles = roles
 	m.updateInteractiveViewport()
 }
 
@@ -1275,14 +1270,16 @@ func (m *Mods) loadConversationHistory() {
 		return
 	}
 	m.messages = messages
-	content, offsets, rawMessages := renderConversation(
+	content, offsets, rawMessages, roles := renderConversation(
 		messages, m.glam,
 		m.Styles.UserMessage, m.Styles.UserMessageFocused,
+		m.Styles.AssistantMessageFocused,
 		m.width, -1, -1,
 	)
 	m.conversationContent = content
 	m.messageOffsets = offsets
 	m.rawMessages = rawMessages
+	m.messageRoles = roles
 	m.updateInteractiveViewport()
 }
 

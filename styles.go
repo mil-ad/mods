@@ -29,6 +29,7 @@ type styles struct {
 	HistoryItem,
 	UserMessage,
 	UserMessageFocused,
+	AssistantMessageFocused,
 	InputBoxFocused,
 	InputBoxBlurred lipgloss.Style
 }
@@ -67,9 +68,11 @@ func makeStyles(r *lipgloss.Renderer) (s styles) {
 		Padding(0, 1)
 	s.UserMessageFocused = r.NewStyle().
 		Border(lipgloss.RoundedBorder()).
-		BorderForeground(lipgloss.Color("#6C50FF")).
-		Bold(true).
+		BorderForeground(lipgloss.Color("#FFD700")).
 		Padding(0, 1)
+	s.AssistantMessageFocused = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#FFD700"))
 	s.InputBoxFocused = r.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#6C50FF")).
