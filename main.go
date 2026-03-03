@@ -141,6 +141,17 @@ var (
 				}
 			}
 
+			// Interactive mode with --list: show conversation picker before starting
+			if config.Interactive && config.List {
+				config.List = false
+				conversations, _ := db.List()
+				if len(conversations) > 0 {
+					if selected := pickConversation(conversations); selected != "" {
+						config.Continue = selected
+					}
+				}
+			}
+
 			cache, err := cache.NewConversations(config.CachePath)
 			if err != nil {
 				return modsError{err, "Couldn't start Bubble Tea program."}
@@ -699,6 +710,23 @@ func makeOptions(conversations []Conversation) []huh.Option[string] {
 		opts = append(opts, huh.NewOption(left+" "+right, c.ID))
 	}
 	return opts
+}
+
+func pickConversation(conversations []Conversation) string {
+	var selected string
+	opts := []huh.Option[string]{huh.NewOption("New conversation", "")}
+	opts = append(opts, makeOptions(conversations)...)
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Conversations").
+				Value(&selected).
+				Options(opts...),
+		),
+	).Run(); err != nil {
+		return ""
+	}
+	return selected
 }
 
 func selectFromList(conversations []Conversation) {
