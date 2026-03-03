@@ -22,6 +22,7 @@ import (
 
 	"github.com/atotto/clipboard"
 	"github.com/caarlos0/go-shellwords"
+	timeago "github.com/caarlos0/timea.go"
 	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
@@ -93,11 +94,17 @@ type Mods struct {
 	messageOffsets      []int
 	rawMessages         []string
 	currentMsgIdx       int
-	yankFlashIdx        int // user message index whose response is flashing (-1 = none)
+	yankFlashIdx        int  // user message index whose response is flashing (-1 = none)
+	browsePendingG      bool // true after pressing 'g' in browse mode, waiting for second key
 	cachedTextareaHeight int    // cached result of interactiveTextareaHeight(); updated by syncTextareaHeight()
 	cachedVLC            int    // cached textareaVisualLineCount result
 	cachedVLCWidth       int    // textarea width used for cachedVLC
 	cachedVLCValue       string // textarea value used for cachedVLC
+
+	// History mode fields (Ctrl+R conversation picker)
+	historyMode          bool
+	historyConversations []Conversation
+	historySelectedIdx   int
 }
 
 // resolveGlamourStyle determines the glamour style name once. It respects the
@@ -377,7 +384,11 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.syncTextareaHeight()
 			m.glamViewport.Width = m.width
-			if m.width != oldWidth && m.width > 0 {
+			if m.historyMode {
+				m.glamViewport.Height = m.height
+				m.glamViewport.SetContent(m.renderHistoryList())
+				m.scrollHistoryIntoView()
+			} else if m.width != oldWidth && m.width > 0 {
 				m.updateGlamRenderer(m.width)
 				m.reRenderConversation()
 				m.reRenderStreamingOutput()
@@ -391,6 +402,10 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case tea.MouseMsg:
+		if m.interactive && m.historyMode {
+			return m.handleHistoryModeMouse(msg)
+		}
 	case tea.KeyMsg:
 		if m.interactive {
 			return m.handleInteractiveKey(msg)
@@ -433,6 +448,9 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	switch m.state {
 	case inputState:
+		if m.historyMode {
+			return m.handleHistoryModeKey(msg)
+		}
 		if m.browseMode {
 			return m.handleBrowseModeKey(msg)
 		}
@@ -440,6 +458,8 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		case "ctrl+c", "ctrl+d":
 			m.state = doneState
 			return m, m.quit
+		case "ctrl+r":
+			return m.enterHistoryMode()
 		case "esc":
 			// No conversation yet: quit the app
 			if len(m.messageOffsets) == 0 {
@@ -524,13 +544,46 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	case "ctrl+c", "q":
 		m.state = doneState
 		return m, m.quit
+	case "ctrl+r":
+		m.browseMode = false
+		m.currentMsgIdx = -1
+		return m.enterHistoryMode()
 	case "esc", "i", "enter":
 		m.browseMode = false
 		m.currentMsgIdx = -1
 		m.reRenderConversation()
 		m.glamViewport.GotoBottom()
 		return m, m.textarea.Focus()
+	case "g":
+		if m.browsePendingG {
+			// gg — go to first message
+			m.browsePendingG = false
+			if len(m.messageOffsets) == 0 {
+				return m, nil
+			}
+			m.currentMsgIdx = 0
+			m.reRenderConversation()
+			m.glamViewport.GotoTop()
+			return m, nil
+		}
+		m.browsePendingG = true
+		return m, nil
+	case "e":
+		if m.browsePendingG {
+			// ge — go to last message
+			m.browsePendingG = false
+			if len(m.messageOffsets) == 0 {
+				return m, nil
+			}
+			m.currentMsgIdx = len(m.messageOffsets) - 1
+			m.reRenderConversation()
+			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
+			return m, nil
+		}
+		m.browsePendingG = false
+		return m, nil
 	case "n", "p":
+		m.browsePendingG = false
 		if len(m.messageOffsets) == 0 {
 			return m, nil
 		}
@@ -539,12 +592,14 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentMsgIdx = 0
 		}
 		m.reRenderConversation()
-		// Set offset AFTER re-render so we use freshly computed offsets
-		if m.currentMsgIdx < len(m.messageOffsets) {
+		if m.currentMsgIdx == 0 {
+			m.glamViewport.GotoTop()
+		} else if m.currentMsgIdx < len(m.messageOffsets) {
 			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
 		}
 		return m, nil
 	case "N", "P":
+		m.browsePendingG = false
 		if len(m.messageOffsets) == 0 {
 			return m, nil
 		}
@@ -553,12 +608,14 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.currentMsgIdx = len(m.messageOffsets) - 1
 		}
 		m.reRenderConversation()
-		// Set offset AFTER re-render so we use freshly computed offsets
-		if m.currentMsgIdx < len(m.messageOffsets) {
+		if m.currentMsgIdx == 0 {
+			m.glamViewport.GotoTop()
+		} else if m.currentMsgIdx < len(m.messageOffsets) {
 			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
 		}
 		return m, nil
 	case "y":
+		m.browsePendingG = false
 		if raw := m.responseForUserMessage(m.currentMsgIdx); raw != "" {
 			m.yankFlashIdx = m.currentMsgIdx
 			m.reRenderConversation()
@@ -571,6 +628,7 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		return m, nil
 	case "Y":
+		m.browsePendingG = false
 		if raw := m.responseForUserMessage(m.currentMsgIdx); raw != "" {
 			m.yankFlashIdx = m.currentMsgIdx
 			m.reRenderConversation()
@@ -582,11 +640,255 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			)
 		}
 		return m, nil
+	default:
+		m.browsePendingG = false
 	}
 	// Allow viewport scrolling in browse mode
 	var cmd tea.Cmd
 	m.glamViewport, cmd = m.glamViewport.Update(msg)
 	return m, cmd
+}
+
+// enterHistoryMode fetches conversations and switches to the history picker.
+func (m *Mods) enterHistoryMode() (tea.Model, tea.Cmd) {
+	conversations, err := m.db.List()
+	if err != nil {
+		return m, nil
+	}
+	// Ensure titles reflect the first user message.
+	for i := range conversations {
+		var msgs []proto.Message
+		if err := m.cache.Read(conversations[i].ID, &msgs); err == nil {
+			if t := firstLine(firstPrompt(msgs)); t != "" {
+				conversations[i].Title = t
+			}
+		}
+	}
+	m.historyMode = true
+	m.historyConversations = conversations
+	m.historySelectedIdx = 0
+	m.textarea.Blur()
+	m.glamViewport.Height = m.height
+	m.glamViewport.SetContent(m.renderHistoryList())
+	m.glamViewport.GotoTop()
+	return m, nil
+}
+
+// handleHistoryModeKey handles key events in the history picker.
+func (m *Mods) handleHistoryModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	totalItems := len(m.historyConversations) + 1 // +1 for "New conversation"
+	switch msg.String() {
+	case "ctrl+c":
+		m.state = doneState
+		return m, m.quit
+	case "esc":
+		m.historyMode = false
+		m.glamViewport.Height = m.interactiveViewportHeight()
+		m.reRenderConversation()
+		m.glamViewport.GotoBottom()
+		return m, m.textarea.Focus()
+	case "j", "down":
+		m.historySelectedIdx++
+		if m.historySelectedIdx >= totalItems {
+			m.historySelectedIdx = 0
+		}
+		m.glamViewport.SetContent(m.renderHistoryList())
+		m.scrollHistoryIntoView()
+		return m, nil
+	case "k", "up":
+		m.historySelectedIdx--
+		if m.historySelectedIdx < 0 {
+			m.historySelectedIdx = totalItems - 1
+		}
+		m.glamViewport.SetContent(m.renderHistoryList())
+		m.scrollHistoryIntoView()
+		return m, nil
+	case "enter":
+		return m.switchConversation()
+	}
+	// Allow viewport scrolling for long lists
+	var cmd tea.Cmd
+	m.glamViewport, cmd = m.glamViewport.Update(msg)
+	return m, cmd
+}
+
+// handleHistoryModeMouse handles mouse events in the history picker.
+func (m *Mods) handleHistoryModeMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	totalItems := len(m.historyConversations) + 1
+	switch {
+	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+		// Map click Y coordinate to a list index, accounting for viewport scroll.
+		idx := msg.Y + m.glamViewport.YOffset
+		if idx >= 0 && idx < totalItems {
+			m.historySelectedIdx = idx
+			m.glamViewport.SetContent(m.renderHistoryList())
+		}
+		return m, nil
+	case msg.Button == tea.MouseButtonWheelUp:
+		if m.glamViewport.YOffset > 0 {
+			m.glamViewport.SetYOffset(m.glamViewport.YOffset - 1)
+		}
+		return m, nil
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.glamViewport.SetYOffset(m.glamViewport.YOffset + 1)
+		return m, nil
+	}
+	return m, nil
+}
+
+// scrollHistoryIntoView ensures the selected history item is visible in the viewport.
+func (m *Mods) scrollHistoryIntoView() {
+	// Each item is 1 line; selected index maps directly to a line offset.
+	line := m.historySelectedIdx
+	vpH := m.glamViewport.Height
+	yOff := m.glamViewport.YOffset
+	if line < yOff {
+		m.glamViewport.SetYOffset(line)
+	} else if line >= yOff+vpH {
+		m.glamViewport.SetYOffset(line - vpH + 1)
+	}
+}
+
+// switchConversation switches to the selected conversation from the history picker.
+func (m *Mods) switchConversation() (tea.Model, tea.Cmd) {
+	m.historyMode = false
+	m.glamViewport.Height = m.interactiveViewportHeight()
+
+	if m.historySelectedIdx == 0 {
+		// "New conversation" — start fresh
+		id := newConversationID()
+		m.Config.cacheWriteToID = id
+		m.Config.cacheReadFromID = ""
+		m.Config.cacheWriteToTitle = ""
+		m.messages = nil
+		m.conversationContent = ""
+		m.messageOffsets = nil
+		m.rawMessages = nil
+		m.glamOutput = ""
+		m.Output = ""
+		m.updateInteractiveViewport()
+		m.glamViewport.GotoBottom()
+		return m, m.textarea.Focus()
+	}
+
+	// Existing conversation
+	convo := m.historyConversations[m.historySelectedIdx-1]
+	m.Config.cacheReadFromID = convo.ID
+	m.Config.cacheWriteToID = convo.ID
+	m.Config.cacheWriteToTitle = convo.Title
+	m.messages = nil
+	m.conversationContent = ""
+	m.messageOffsets = nil
+	m.rawMessages = nil
+	m.glamOutput = ""
+	m.Output = ""
+	m.loadConversationHistory()
+	m.glamViewport.GotoBottom()
+	return m, m.textarea.Focus()
+}
+
+// renderHistoryList renders the conversation history as a styled list.
+func (m *Mods) renderHistoryList() string {
+	var sb strings.Builder
+
+	w := m.width - 2 //nolint:mnd // account for padding
+	if w < 20 {       //nolint:mnd
+		w = 20
+	}
+	innerW := w - 2 //nolint:mnd // padding inside HistoryItem/HistorySelected
+
+	// Fixed-width timestamp column covers all timeago values (e.g. "12 months ago").
+	const timeCol = 16
+
+	// "New conversation" entry
+	label := "+ New conversation"
+	if m.historySelectedIdx == 0 {
+		sb.WriteString(m.Styles.HistorySelected.Width(w).Render(label))
+	} else {
+		sb.WriteString(m.Styles.HistoryItem.Width(w).Render(label))
+	}
+	sb.WriteString("\n")
+
+	for i, c := range m.historyConversations {
+		timea := timeago.Of(c.UpdatedAt)
+		// Pad/truncate timestamp to fixed width
+		if rw.StringWidth(timea) < timeCol {
+			timea += strings.Repeat(" ", timeCol-rw.StringWidth(timea))
+		} else {
+			timea = rw.Truncate(timea, timeCol, "")
+		}
+
+		model := ""
+		if c.Model != nil {
+			model = strings.TrimSpace(*c.Model)
+		}
+		modelW := rw.StringWidth(model)
+
+		// Sanitize title — strip whitespace so width math is reliable.
+		title := strings.TrimSpace(c.Title)
+		title = strings.ReplaceAll(title, "\t", " ")
+
+		// Budget: afterTime = space after timestamp. Title gets up to 80%
+		// of that, but is further reduced to guarantee title+gap+model fits
+		// in a single line.
+		afterTime := innerW - timeCol
+		titleMax := afterTime * 4 / 5 //nolint:mnd
+		if model != "" {
+			fitMax := afterTime - modelW - 2 //nolint:mnd // 2 = min gap
+			if fitMax < titleMax {
+				titleMax = fitMax
+			}
+		}
+		if titleMax < 1 {
+			titleMax = 1
+		}
+
+		if rw.StringWidth(title) > titleMax {
+			title = rw.Truncate(title, titleMax-1, "") + "…"
+		}
+		titleW := rw.StringWidth(title)
+
+		// Right-align model: fill remaining space with gap, but never
+		// let the total exceed innerW.
+		gap := afterTime - titleW - modelW
+		if gap < 2 { //nolint:mnd
+			// Not enough room — shrink model to fit.
+			modelMax := afterTime - titleW - 2 //nolint:mnd
+			if modelMax < 0 {
+				modelMax = 0
+			}
+			if modelW > modelMax {
+				model = rw.Truncate(model, modelMax, "")
+				modelW = rw.StringWidth(model)
+			}
+			gap = afterTime - titleW - modelW
+			if gap < 1 {
+				gap = 1
+			}
+		}
+
+		if m.historySelectedIdx == i+1 {
+			line := timea + title
+			if model != "" {
+				line += strings.Repeat(" ", gap) + model
+			}
+			sb.WriteString(m.Styles.HistorySelected.Width(w).Render(line))
+		} else {
+			line := m.Styles.Timeago.Render(timea) + title
+			if model != "" {
+				line += strings.Repeat(" ", gap) + m.Styles.Comment.Render(model)
+			}
+			sb.WriteString(m.Styles.HistoryItem.Width(w).Render(line))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(m.historyConversations) == 0 {
+		sb.WriteString(m.Styles.Comment.Render("  No saved conversations"))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
 }
 
 // responseForUserMessage returns the assistant response that follows the Nth
@@ -696,6 +998,10 @@ func (m *Mods) interactiveView() string {
 	case doneState:
 		return ""
 	case inputState:
+		if m.historyMode {
+			return m.padToTermHeight(trimViewportBottom(m.glamViewport.View()))
+		}
+
 		// Use focused style when typing, dimmer when in browse mode
 		boxStyle := m.Styles.InputBoxFocused
 		if m.browseMode {
@@ -878,13 +1184,14 @@ func (m *Mods) syncTextareaHeight() {
 }
 
 // interactiveViewportHeight calculates the viewport height for interactive mode,
-// reserving space for the textarea and status line.
+// reserving space for the textarea and the blank separator line between them.
 func (m *Mods) interactiveViewportHeight() int {
 	taHeight := m.cachedTextareaHeight
 	if taHeight == 0 {
 		taHeight = m.interactiveTextareaHeight() // fallback before first sync
 	}
-	vpHeight := m.height - taHeight
+	const separatorLines = 1 // the "\n\n" between viewport and textarea adds 1 visible blank line
+	vpHeight := m.height - taHeight - separatorLines
 	if vpHeight < 1 {
 		vpHeight = 1
 	}
@@ -905,7 +1212,7 @@ func (m *Mods) appendResponseToConversation() {
 	if m.glam != nil {
 		glamRendered, err := m.glam.Render(m.Output)
 		if err == nil {
-			glamRendered = strings.TrimRightFunc(glamRendered, unicode.IsSpace)
+			glamRendered = strings.TrimFunc(glamRendered, unicode.IsSpace)
 			glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
 			m.conversationContent += glamRendered + "\n\n"
 			m.updateInteractiveViewport()
@@ -985,9 +1292,9 @@ func (m *Mods) interactiveSave() {
 		return
 	}
 	id := m.Config.cacheWriteToID
-	title := strings.TrimSpace(m.Config.cacheWriteToTitle)
-	if sha1reg.MatchString(title) || title == "" {
-		title = firstLine(lastPrompt(m.messages))
+	title := firstLine(firstPrompt(m.messages))
+	if title == "" {
+		title = strings.TrimSpace(m.Config.cacheWriteToTitle)
 	}
 	if title == "" {
 		title = "interactive conversation"
