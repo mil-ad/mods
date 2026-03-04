@@ -886,7 +886,6 @@ func (m *Mods) renderHistoryList() string {
 	return sb.String()
 }
 
-
 func (m Mods) viewportNeeded() bool {
 	if m.interactive {
 		return m.glamHeight > m.interactiveViewportHeight()
@@ -898,8 +897,8 @@ func (m Mods) viewportNeeded() bool {
 // browse-mode message is an assistant response AND is the last message.
 func (m *Mods) lastMessageIsHighlightedAssistant() bool {
 	last := len(m.messageRoles) - 1
-	return m.currentMsgIdx >= 0 && m.currentMsgIdx == last &&
-		last < len(m.messageRoles) && m.messageRoles[last] == proto.RoleAssistant
+	return last >= 0 && m.currentMsgIdx == last &&
+		m.messageRoles[last] == proto.RoleAssistant
 }
 
 func newResponseSpinner(r *lipgloss.Renderer) spinner.Model {
