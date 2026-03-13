@@ -583,7 +583,7 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		}
 		m.browsePendingG = false
 		return m, nil
-	case "n", "N":
+	case "j":
 		m.browsePendingG = false
 		if len(m.messageOffsets) == 0 || m.currentMsgIdx >= len(m.messageOffsets)-1 {
 			return m, nil
@@ -592,7 +592,7 @@ func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.reRenderConversation()
 		m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
 		return m, nil
-	case "p", "P":
+	case "k":
 		m.browsePendingG = false
 		if len(m.messageOffsets) == 0 || m.currentMsgIdx <= 0 {
 			return m, nil
