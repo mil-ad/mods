@@ -24,7 +24,14 @@ type styles struct {
 	Quote,
 	ConversationList,
 	SHA1,
-	Timeago lipgloss.Style
+	Timeago,
+	HistorySelected,
+	HistoryItem,
+	UserMessage,
+	UserMessageFocused,
+	AssistantMessageFocused,
+	InputBoxFocused,
+	InputBoxBlurred lipgloss.Style
 }
 
 func makeStyles(r *lipgloss.Renderer) (s styles) {
@@ -46,6 +53,34 @@ func makeStyles(r *lipgloss.Renderer) (s styles) {
 	s.ConversationList = r.NewStyle().Padding(0, 1)
 	s.SHA1 = s.Flag
 	s.Timeago = r.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#999", Dark: "#555"})
+	s.HistorySelected = r.NewStyle().
+		Foreground(lipgloss.Color("#F1F1F1")).
+		Background(lipgloss.Color("#6C50FF")).
+		Bold(true).
+		Padding(0, 1).
+		Width(0) // set dynamically
+	s.HistoryItem = r.NewStyle().
+		Padding(0, 1).
+		Width(0) // set dynamically
+	s.UserMessage = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#555555")).
+		Padding(0, 1)
+	s.UserMessageFocused = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#FFD700")).
+		Padding(0, 1)
+	s.AssistantMessageFocused = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#FFD700"))
+	s.InputBoxFocused = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#6C50FF")).
+		Padding(0, 1)
+	s.InputBoxBlurred = r.NewStyle().
+		Border(lipgloss.RoundedBorder()).
+		BorderForeground(lipgloss.Color("#555555")).
+		Padding(0, 1)
 	return s
 }
 

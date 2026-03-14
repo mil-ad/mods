@@ -20,7 +20,11 @@ import (
 	"time"
 	"unicode"
 
+	"github.com/atotto/clipboard"
 	"github.com/caarlos0/go-shellwords"
+	timeago "github.com/caarlos0/timea.go"
+	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/textarea"
 	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
@@ -34,6 +38,9 @@ import (
 	"github.com/charmbracelet/mods/internal/proto"
 	"github.com/charmbracelet/mods/internal/stream"
 	"github.com/charmbracelet/x/exp/ordered"
+	rw "github.com/mattn/go-runewidth"
+	"github.com/rivo/uniseg"
+	"golang.org/x/term"
 )
 
 type state int
@@ -41,6 +48,7 @@ type state int
 const (
 	startState state = iota
 	configLoadedState
+	inputState
 	requestState
 	responseState
 	doneState
@@ -58,14 +66,16 @@ type Mods struct {
 	retries       int
 	renderer      *lipgloss.Renderer
 	glam          *glamour.TermRenderer
+	glamStyle     string // resolved glamour style ("dark"/"light"); detected once at startup
 	glamViewport  viewport.Model
 	glamOutput    string
 	glamHeight    int
 	messages      []proto.Message
 	cancelRequest []context.CancelFunc
-	anim          tea.Model
-	width         int
-	height        int
+	anim            tea.Model
+	responseSpinner spinner.Model
+	width           int
+	height          int
 
 	db     *convoDB
 	cache  *cache.Conversations
@@ -75,6 +85,41 @@ type Mods struct {
 	contentMutex *sync.Mutex
 
 	ctx context.Context
+
+	// Interactive mode fields
+	textarea            textarea.Model
+	interactive         bool
+	browseMode          bool
+	conversationContent string
+	messageOffsets      []int
+	rawMessages         []string
+	messageRoles        []string
+	currentMsgIdx       int
+	yankFlashIdx        int  // index of the message being flash-highlighted (-1 = none)
+	browsePendingG      bool // true after pressing 'g' in browse mode, waiting for second key
+	cachedTextareaHeight int    // cached result of interactiveTextareaHeight(); updated by syncTextareaHeight()
+	cachedVLC            int    // cached textareaVisualLineCount result
+	cachedVLCWidth       int    // textarea width used for cachedVLC
+	cachedVLCValue       string // textarea value used for cachedVLC
+
+	// History mode fields (Ctrl+R conversation picker)
+	historyMode          bool
+	historyConversations []Conversation
+	historySelectedIdx   int
+}
+
+// resolveGlamourStyle determines the glamour style name once. It respects the
+// GLAMOUR_STYLE env var; otherwise it uses the lipgloss renderer's cached
+// background color detection. This must be called before bubbletea takes over
+// stdin, since the initial detection sends an OSC escape sequence.
+func resolveGlamourStyle() string {
+	if s := os.Getenv("GLAMOUR_STYLE"); s != "" && s != "auto" {
+		return s
+	}
+	if lipgloss.HasDarkBackground() {
+		return "dark"
+	}
+	return "light"
 }
 
 func newMods(
@@ -84,25 +129,86 @@ func newMods(
 	db *convoDB,
 	cache *cache.Conversations,
 ) *Mods {
+	wordWrap := cfg.WordWrap
+	width, height := 0, 0
+	if cfg.DynamicWidth {
+		if w, h, err := term.GetSize(int(os.Stdout.Fd())); err == nil && w > 0 {
+			wordWrap = w
+			width, height = w, h
+		}
+	}
+	// Detect glamour style once at startup (before bubbletea takes over the
+	// terminal). This calls termenv.HasDarkBackground() which sends an OSC
+	// query — safe here, but must not be repeated during resize.
+	glamStyle := resolveGlamourStyle()
 	gr, _ := glamour.NewTermRenderer(
-		glamour.WithEnvironmentConfig(),
-		glamour.WithWordWrap(cfg.WordWrap),
+		glamour.WithStandardStyle(glamStyle),
+		glamour.WithWordWrap(wordWrap),
 	)
-	vp := viewport.New(0, 0)
+	vp := viewport.New(width, height)
 	vp.GotoBottom()
-	return &Mods{
-		Styles:       makeStyles(r),
-		glam:         gr,
-		state:        startState,
-		renderer:     r,
-		glamViewport: vp,
-		contentMutex: &sync.Mutex{},
-		db:           db,
-		cache:        cache,
-		Config:       cfg,
-		ctx:          ctx,
+	m := &Mods{
+		Styles:          makeStyles(r),
+		glam:            gr,
+		glamStyle:       glamStyle,
+		state:           startState,
+		renderer:        r,
+		glamViewport:    vp,
+		responseSpinner: newResponseSpinner(r),
+		width:           width,
+		height:          height,
+		contentMutex:    &sync.Mutex{},
+		db:              db,
+		cache:           cache,
+		Config:          cfg,
+		ctx:             ctx,
+		interactive:     cfg.Interactive,
+		currentMsgIdx:   -1,
+		yankFlashIdx:    -1,
+	}
+	if cfg.Interactive {
+		m.textarea = newInteractiveTextarea()
+		if width > 0 {
+			m.textarea.SetWidth(width - 6) //nolint:mnd
+		}
+		m.syncTextareaHeight()
+	}
+	return m
+}
+
+// updateGlamRenderer recreates the glamour renderer with a new word wrap width.
+// Uses the style resolved at startup to avoid expensive terminal queries.
+func (m *Mods) updateGlamRenderer(width int) {
+	gr, _ := glamour.NewTermRenderer(
+		glamour.WithStandardStyle(m.glamStyle),
+		glamour.WithWordWrap(width),
+	)
+	m.glam = gr
+}
+
+// reRenderOutput re-renders the current output with the current glamour settings.
+func (m *Mods) reRenderOutput() {
+	if !isOutputTTY() || m.Config.Raw || m.Output == "" {
+		return
+	}
+
+	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
+	m.glamOutput, _ = m.glam.Render(m.Output)
+	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
+	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
+	m.glamHeight = lipgloss.Height(m.glamOutput)
+	m.glamOutput += "\n"
+	truncatedGlamOutput := m.renderer.NewStyle().
+		MaxWidth(m.width).
+		Render(m.glamOutput)
+	m.glamViewport.SetContent(truncatedGlamOutput)
+	if wasAtBottom {
+		m.glamViewport.GotoBottom()
 	}
 }
+
+// clearYankFlashMsg signals that the yank flash highlight should be cleared.
+type clearYankFlashMsg struct{}
 
 // completionInput is a tea.Msg that wraps the content read from stdin.
 type completionInput struct {
@@ -137,13 +243,34 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			cmds = append(cmds, m.anim.Init())
 		}
 		m.state = configLoadedState
-		cmds = append(cmds, m.readStdinCmd)
+
+		if m.interactive {
+			// In interactive mode, load any continued conversation first
+			if m.Config.cacheReadFromID != "" {
+				m.loadConversationHistory()
+			}
+			// If there's initial input (stdin or args), process it as first turn
+			if !isInputTTY() || m.Config.Prefix != "" {
+				cmds = append(cmds, m.readStdinCmd)
+			} else {
+				// No initial input: go straight to input state for user to type
+				m.state = inputState
+				cmds = append(cmds, m.textarea.Focus())
+			}
+		} else {
+			cmds = append(cmds, m.readStdinCmd)
+		}
 
 	case completionInput:
 		if msg.content != "" {
 			m.Input = removeWhitespace(msg.content)
 		}
 		if m.Input == "" && m.Config.Prefix == "" && m.Config.Show == "" && !m.Config.ShowLast {
+			if m.interactive {
+				m.state = inputState
+				cmds = append(cmds, m.textarea.Focus())
+				return m, tea.Batch(cmds...)
+			}
 			return m, m.quit
 		}
 		if m.Config.Dirs ||
@@ -168,16 +295,71 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			m.appendToOutput(strings.Join(parts, "\n") + "\n")
 		}
+
+		if m.interactive {
+			// Add user message to conversation display
+			userContent := m.Config.Prefix
+			if msg.content != "" {
+				if userContent != "" {
+					userContent = userContent + "\n\n" + msg.content
+				} else {
+					userContent = msg.content
+				}
+			}
+			m.appendUserMessageToConversation(strings.TrimSpace(userContent))
+		}
+
 		m.state = requestState
 		cmds = append(cmds, m.startCompletionCmd(msg.content))
+
+	case textareaSubmitMsg:
+		if strings.TrimSpace(msg.content) == "" {
+			return m, nil
+		}
+		m.textarea.Reset()
+		m.syncTextareaHeight()
+		m.browseMode = false
+
+		// Add user message to conversation display
+		m.appendUserMessageToConversation(msg.content)
+
+		// Set up for the next request: use the textarea content as the input
+		m.Config.Prefix = msg.content
+		m.Input = msg.content
+		m.Output = ""
+		m.state = requestState
+
+		if !m.Config.Quiet {
+			m.anim = newAnim(m.Config.Fanciness, m.Config.StatusText, m.renderer, m.Styles)
+			cmds = append(cmds, m.anim.Init())
+		}
+		cmds = append(cmds, m.startCompletionCmd(""))
+
 	case completionOutput:
 		if msg.stream == nil {
+			if m.interactive {
+				// Clear streaming output BEFORE appending to conversation
+				// to avoid doubling the response in the viewport.
+				m.glamOutput = ""
+				m.appendResponseToConversation()
+				m.interactiveSave()
+				m.Output = ""
+				m.state = inputState
+				cmds = append(cmds, m.textarea.Focus())
+				return m, tea.Batch(cmds...)
+			}
 			m.state = doneState
 			return m, m.quit
 		}
 		if msg.content != "" {
 			m.appendToOutput(msg.content)
-			m.state = responseState
+			if m.interactive {
+				m.updateInteractiveViewport()
+			}
+			if m.state != responseState {
+				m.state = responseState
+				cmds = append(cmds, m.responseSpinner.Tick)
+			}
 		}
 		cmds = append(cmds, m.receiveCompletionStreamCmd(completionOutput{
 			stream: msg.stream,
@@ -187,12 +369,48 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.Error = &msg
 		m.state = errorState
 		return m, m.quit
-	case tea.WindowSizeMsg:
-		m.width, m.height = msg.Width, msg.Height
-		m.glamViewport.Width = m.width
-		m.glamViewport.Height = m.height
+	case clearYankFlashMsg:
+		m.yankFlashIdx = -1
+		m.reRenderConversation()
 		return m, nil
+	case tea.WindowSizeMsg:
+		oldWidth, oldHeight := m.width, m.height
+		m.width, m.height = msg.Width, msg.Height
+		if m.width == oldWidth && m.height == oldHeight {
+			return m, nil
+		}
+		if m.interactive {
+			if m.width != oldWidth {
+				m.textarea.SetWidth(m.width - 6) //nolint:mnd
+			}
+			m.syncTextareaHeight()
+			m.glamViewport.Width = m.width
+			if m.historyMode {
+				m.glamViewport.Height = m.height
+				m.glamViewport.SetContent(m.renderHistoryList())
+				m.scrollHistoryIntoView()
+			} else if m.width != oldWidth && m.width > 0 {
+				m.updateGlamRenderer(m.width)
+				m.reRenderConversation()
+				m.reRenderStreamingOutput()
+			}
+		} else {
+			m.glamViewport.Width = m.width
+			m.glamViewport.Height = m.height
+			if m.Config.DynamicWidth && m.width != oldWidth && m.width > 0 {
+				m.updateGlamRenderer(m.width)
+				m.reRenderOutput()
+			}
+		}
+		return m, nil
+	case tea.MouseMsg:
+		if m.interactive && m.historyMode {
+			return m.handleHistoryModeMouse(msg)
+		}
 	case tea.KeyMsg:
+		if m.interactive {
+			return m.handleInteractiveKey(msg)
+		}
 		switch msg.String() {
 		case "q", "ctrl+c":
 			m.state = doneState
@@ -204,22 +422,517 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.anim, cmd = m.anim.Update(msg)
 		cmds = append(cmds, cmd)
 	}
-	if m.viewportNeeded() {
+	if m.interactive {
+		// In interactive mode, always forward events to viewport for scrolling
+		// (mouse wheel, etc.). Key events are handled by handleInteractiveKey.
+		var cmd tea.Cmd
+		m.glamViewport, cmd = m.glamViewport.Update(msg)
+		cmds = append(cmds, cmd)
+	} else if m.viewportNeeded() {
 		// Only respond to keypresses when the viewport (i.e. the content) is
 		// taller than the window.
 		var cmd tea.Cmd
 		m.glamViewport, cmd = m.glamViewport.Update(msg)
 		cmds = append(cmds, cmd)
 	}
+	if m.state == responseState {
+		var cmd tea.Cmd
+		m.responseSpinner, cmd = m.responseSpinner.Update(msg)
+		cmds = append(cmds, cmd)
+	}
 	return m, tea.Batch(cmds...)
 }
 
+// handleInteractiveKey handles key events in interactive mode.
+func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	var cmds []tea.Cmd
+
+	switch m.state {
+	case inputState:
+		if m.historyMode {
+			return m.handleHistoryModeKey(msg)
+		}
+		if m.browseMode {
+			return m.handleBrowseModeKey(msg)
+		}
+		switch msg.String() {
+		case "ctrl+c", "ctrl+d":
+			m.state = doneState
+			return m, m.quit
+		case "ctrl+r":
+			return m.enterHistoryMode()
+		case "esc":
+			// No conversation yet: quit the app
+			if len(m.messageOffsets) == 0 {
+				m.state = doneState
+				return m, m.quit
+			}
+			m.browseMode = true
+			m.textarea.Blur()
+			// Start at the last message and scroll to it
+			m.currentMsgIdx = len(m.messageOffsets) - 1
+			m.reRenderConversation()
+			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
+			return m, nil
+		case "ctrl+v", "alt+v":
+			// Paste from clipboard directly so we can sync textarea height
+			// after insertion. The textarea's built-in Paste is async and
+			// the height sync gets lost.
+			if str, err := clipboard.ReadAll(); err == nil && str != "" {
+				m.textarea.InsertString(str)
+				m.syncTextareaHeight()
+			}
+			return m, nil
+		case "ctrl+j":
+			// Kitty (and other terminals) send \n (0x0A) for shift+enter,
+			// which Bubble Tea maps to ctrl+j. Insert a newline.
+			m.textarea.InsertString("\n")
+			m.syncTextareaHeight()
+			return m, nil
+		case "enter":
+			content := m.textarea.Value()
+			if strings.TrimSpace(content) == "" {
+				return m, nil
+			}
+			return m, func() tea.Msg {
+				return textareaSubmitMsg{content: content}
+			}
+		}
+		// Filter terminal escape sequence noise before passing to textarea
+		if isTerminalNoise(msg) {
+			return m, nil
+		}
+		// Expand textarea height before Update so that repositionView()
+		// inside Update doesn't scroll content off-screen. We set the
+		// correct height afterward in syncTextareaHeight.
+		m.textarea.SetHeight(m.height)
+		var cmd tea.Cmd
+		m.textarea, cmd = m.textarea.Update(msg)
+		cmds = append(cmds, cmd)
+		m.syncTextareaHeight()
+		return m, tea.Batch(cmds...)
+
+	case requestState, responseState:
+		switch msg.String() {
+		case "ctrl+c":
+			m.state = doneState
+			return m, m.quit
+		}
+		// Allow viewport scrolling during response
+		var cmd tea.Cmd
+		m.glamViewport, cmd = m.glamViewport.Update(msg)
+		cmds = append(cmds, cmd)
+		if m.state == responseState {
+			var cmd2 tea.Cmd
+			m.responseSpinner, cmd2 = m.responseSpinner.Update(msg)
+			cmds = append(cmds, cmd2)
+		}
+		return m, tea.Batch(cmds...)
+
+	default:
+		switch msg.String() {
+		case "q", "ctrl+c":
+			m.state = doneState
+			return m, m.quit
+		}
+	}
+	return m, nil
+}
+
+// handleBrowseModeKey handles key events in browse mode.
+func (m *Mods) handleBrowseModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	switch msg.String() {
+	case "ctrl+c", "q":
+		m.state = doneState
+		return m, m.quit
+	case "ctrl+r":
+		m.browseMode = false
+		m.currentMsgIdx = -1
+		return m.enterHistoryMode()
+	case "esc", "i", "enter":
+		m.browseMode = false
+		m.currentMsgIdx = -1
+		m.reRenderConversation()
+		m.glamViewport.GotoBottom()
+		return m, m.textarea.Focus()
+	case "g":
+		if m.browsePendingG {
+			// gg — go to first message
+			m.browsePendingG = false
+			if len(m.messageOffsets) == 0 {
+				return m, nil
+			}
+			m.currentMsgIdx = 0
+			m.reRenderConversation()
+			m.glamViewport.GotoTop()
+			return m, nil
+		}
+		m.browsePendingG = true
+		return m, nil
+	case "e":
+		if m.browsePendingG {
+			// ge — go to last message
+			m.browsePendingG = false
+			if len(m.messageOffsets) == 0 {
+				return m, nil
+			}
+			m.currentMsgIdx = len(m.messageOffsets) - 1
+			m.reRenderConversation()
+			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
+			return m, nil
+		}
+		m.browsePendingG = false
+		return m, nil
+	case "j":
+		m.browsePendingG = false
+		if len(m.messageOffsets) == 0 || m.currentMsgIdx >= len(m.messageOffsets)-1 {
+			return m, nil
+		}
+		m.currentMsgIdx++
+		m.reRenderConversation()
+		m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
+		return m, nil
+	case "k":
+		m.browsePendingG = false
+		if len(m.messageOffsets) == 0 || m.currentMsgIdx <= 0 {
+			return m, nil
+		}
+		m.currentMsgIdx--
+		m.reRenderConversation()
+		if m.currentMsgIdx == 0 {
+			m.glamViewport.GotoTop()
+		} else {
+			m.glamViewport.SetYOffset(m.messageOffsets[m.currentMsgIdx])
+		}
+		return m, nil
+	case "y":
+		m.browsePendingG = false
+		if m.currentMsgIdx >= 0 && m.currentMsgIdx < len(m.rawMessages) {
+			raw := m.rawMessages[m.currentMsgIdx]
+			m.yankFlashIdx = m.currentMsgIdx
+			m.reRenderConversation()
+			return m, tea.Batch(
+				copyToClipboard(raw, false),
+				tea.Tick(125*time.Millisecond, func(time.Time) tea.Msg { //nolint:mnd
+					return clearYankFlashMsg{}
+				}),
+			)
+		}
+		return m, nil
+	case "Y":
+		m.browsePendingG = false
+		if m.currentMsgIdx >= 0 && m.currentMsgIdx < len(m.rawMessages) {
+			raw := m.rawMessages[m.currentMsgIdx]
+			m.yankFlashIdx = m.currentMsgIdx
+			m.reRenderConversation()
+			return m, tea.Batch(
+				copyToClipboard(raw, true),
+				tea.Tick(125*time.Millisecond, func(time.Time) tea.Msg { //nolint:mnd
+					return clearYankFlashMsg{}
+				}),
+			)
+		}
+		return m, nil
+	default:
+		m.browsePendingG = false
+	}
+	// Allow viewport scrolling in browse mode
+	var cmd tea.Cmd
+	m.glamViewport, cmd = m.glamViewport.Update(msg)
+	return m, cmd
+}
+
+// enterHistoryMode fetches conversations and switches to the history picker.
+func (m *Mods) enterHistoryMode() (tea.Model, tea.Cmd) {
+	conversations, err := m.db.List()
+	if err != nil {
+		return m, nil
+	}
+	// Ensure titles reflect the first user message.
+	for i := range conversations {
+		var msgs []proto.Message
+		if err := m.cache.Read(conversations[i].ID, &msgs); err == nil {
+			if t := firstLine(firstPrompt(msgs)); t != "" {
+				conversations[i].Title = t
+			}
+		}
+	}
+	m.historyMode = true
+	m.historyConversations = conversations
+	m.historySelectedIdx = 0
+	m.textarea.Blur()
+	m.glamViewport.Height = m.height
+	m.glamViewport.SetContent(m.renderHistoryList())
+	m.glamViewport.GotoTop()
+	return m, nil
+}
+
+// handleHistoryModeKey handles key events in the history picker.
+func (m *Mods) handleHistoryModeKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	totalItems := len(m.historyConversations) + 1 // +1 for "New conversation"
+	switch msg.String() {
+	case "ctrl+c":
+		m.state = doneState
+		return m, m.quit
+	case "esc":
+		m.historyMode = false
+		m.glamViewport.Height = m.interactiveViewportHeight()
+		m.reRenderConversation()
+		m.glamViewport.GotoBottom()
+		return m, m.textarea.Focus()
+	case "j", "down":
+		m.historySelectedIdx++
+		if m.historySelectedIdx >= totalItems {
+			m.historySelectedIdx = 0
+		}
+		m.glamViewport.SetContent(m.renderHistoryList())
+		m.scrollHistoryIntoView()
+		return m, nil
+	case "k", "up":
+		m.historySelectedIdx--
+		if m.historySelectedIdx < 0 {
+			m.historySelectedIdx = totalItems - 1
+		}
+		m.glamViewport.SetContent(m.renderHistoryList())
+		m.scrollHistoryIntoView()
+		return m, nil
+	case "enter":
+		return m.switchConversation()
+	}
+	// Allow viewport scrolling for long lists
+	var cmd tea.Cmd
+	m.glamViewport, cmd = m.glamViewport.Update(msg)
+	return m, cmd
+}
+
+// handleHistoryModeMouse handles mouse events in the history picker.
+func (m *Mods) handleHistoryModeMouse(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
+	totalItems := len(m.historyConversations) + 1
+	switch {
+	case msg.Button == tea.MouseButtonLeft && msg.Action == tea.MouseActionPress:
+		// Map click Y coordinate to a list index, accounting for viewport scroll.
+		idx := msg.Y + m.glamViewport.YOffset
+		if idx >= 0 && idx < totalItems {
+			m.historySelectedIdx = idx
+			m.glamViewport.SetContent(m.renderHistoryList())
+		}
+		return m, nil
+	case msg.Button == tea.MouseButtonWheelUp:
+		if m.glamViewport.YOffset > 0 {
+			m.glamViewport.SetYOffset(m.glamViewport.YOffset - 1)
+		}
+		return m, nil
+	case msg.Button == tea.MouseButtonWheelDown:
+		m.glamViewport.SetYOffset(m.glamViewport.YOffset + 1)
+		return m, nil
+	}
+	return m, nil
+}
+
+// scrollHistoryIntoView ensures the selected history item is visible in the viewport.
+func (m *Mods) scrollHistoryIntoView() {
+	// Each item is 1 line; selected index maps directly to a line offset.
+	line := m.historySelectedIdx
+	vpH := m.glamViewport.Height
+	yOff := m.glamViewport.YOffset
+	if line < yOff {
+		m.glamViewport.SetYOffset(line)
+	} else if line >= yOff+vpH {
+		m.glamViewport.SetYOffset(line - vpH + 1)
+	}
+}
+
+// switchConversation switches to the selected conversation from the history picker.
+func (m *Mods) switchConversation() (tea.Model, tea.Cmd) {
+	m.historyMode = false
+	m.glamViewport.Height = m.interactiveViewportHeight()
+
+	if m.historySelectedIdx == 0 {
+		// "New conversation" — start fresh
+		id := newConversationID()
+		m.Config.cacheWriteToID = id
+		m.Config.cacheReadFromID = ""
+		m.Config.cacheWriteToTitle = ""
+		m.messages = nil
+		m.conversationContent = ""
+		m.messageOffsets = nil
+		m.rawMessages = nil
+		m.messageRoles = nil
+		m.glamOutput = ""
+		m.Output = ""
+		m.updateInteractiveViewport()
+		m.glamViewport.GotoBottom()
+		return m, m.textarea.Focus()
+	}
+
+	// Existing conversation
+	convo := m.historyConversations[m.historySelectedIdx-1]
+	m.Config.cacheReadFromID = convo.ID
+	m.Config.cacheWriteToID = convo.ID
+	m.Config.cacheWriteToTitle = convo.Title
+	m.messages = nil
+	m.conversationContent = ""
+	m.messageOffsets = nil
+	m.rawMessages = nil
+	m.messageRoles = nil
+	m.glamOutput = ""
+	m.Output = ""
+	m.loadConversationHistory()
+	m.glamViewport.GotoBottom()
+	return m, m.textarea.Focus()
+}
+
+// renderHistoryList renders the conversation history as a styled list.
+func (m *Mods) renderHistoryList() string {
+	var sb strings.Builder
+
+	w := m.width - 2 //nolint:mnd // account for padding
+	if w < 20 {       //nolint:mnd
+		w = 20
+	}
+	innerW := w - 2 //nolint:mnd // padding inside HistoryItem/HistorySelected
+
+	// Fixed-width timestamp column covers all timeago values (e.g. "12 months ago").
+	const timeCol = 16
+
+	// "New conversation" entry
+	label := "+ New conversation"
+	if m.historySelectedIdx == 0 {
+		sb.WriteString(m.Styles.HistorySelected.Width(w).Render(label))
+	} else {
+		sb.WriteString(m.Styles.HistoryItem.Width(w).Render(label))
+	}
+	sb.WriteString("\n")
+
+	for i, c := range m.historyConversations {
+		timea := timeago.Of(c.UpdatedAt)
+		// Pad/truncate timestamp to fixed width
+		if rw.StringWidth(timea) < timeCol {
+			timea += strings.Repeat(" ", timeCol-rw.StringWidth(timea))
+		} else {
+			timea = rw.Truncate(timea, timeCol, "")
+		}
+
+		model := ""
+		if c.Model != nil {
+			model = strings.TrimSpace(*c.Model)
+		}
+		modelW := rw.StringWidth(model)
+
+		// Sanitize title — strip whitespace so width math is reliable.
+		title := strings.TrimSpace(c.Title)
+		title = strings.ReplaceAll(title, "\t", " ")
+
+		// Budget: afterTime = space after timestamp. Title gets up to 80%
+		// of that, but is further reduced to guarantee title+gap+model fits
+		// in a single line.
+		afterTime := innerW - timeCol
+		titleMax := afterTime * 4 / 5 //nolint:mnd
+		if model != "" {
+			fitMax := afterTime - modelW - 2 //nolint:mnd // 2 = min gap
+			if fitMax < titleMax {
+				titleMax = fitMax
+			}
+		}
+		if titleMax < 1 {
+			titleMax = 1
+		}
+
+		if rw.StringWidth(title) > titleMax {
+			title = rw.Truncate(title, titleMax-1, "") + "…"
+		}
+		titleW := rw.StringWidth(title)
+
+		// Right-align model: fill remaining space with gap, but never
+		// let the total exceed innerW.
+		gap := afterTime - titleW - modelW
+		if gap < 2 { //nolint:mnd
+			// Not enough room — shrink model to fit.
+			modelMax := afterTime - titleW - 2 //nolint:mnd
+			if modelMax < 0 {
+				modelMax = 0
+			}
+			if modelW > modelMax {
+				model = rw.Truncate(model, modelMax, "")
+				modelW = rw.StringWidth(model)
+			}
+			gap = afterTime - titleW - modelW
+			if gap < 1 {
+				gap = 1
+			}
+		}
+
+		if m.historySelectedIdx == i+1 {
+			line := timea + title
+			if model != "" {
+				line += strings.Repeat(" ", gap) + model
+			}
+			sb.WriteString(m.Styles.HistorySelected.Width(w).Render(line))
+		} else {
+			line := m.Styles.Timeago.Render(timea) + title
+			if model != "" {
+				line += strings.Repeat(" ", gap) + m.Styles.Comment.Render(model)
+			}
+			sb.WriteString(m.Styles.HistoryItem.Width(w).Render(line))
+		}
+		sb.WriteString("\n")
+	}
+
+	if len(m.historyConversations) == 0 {
+		sb.WriteString(m.Styles.Comment.Render("  No saved conversations"))
+		sb.WriteString("\n")
+	}
+
+	return sb.String()
+}
+
 func (m Mods) viewportNeeded() bool {
+	if m.interactive {
+		return m.glamHeight > m.interactiveViewportHeight()
+	}
 	return m.glamHeight > m.height
+}
+
+// lastMessageIsHighlightedAssistant reports whether the currently selected
+// browse-mode message is an assistant response AND is the last message.
+func (m *Mods) lastMessageIsHighlightedAssistant() bool {
+	last := len(m.messageRoles) - 1
+	return last >= 0 && m.currentMsgIdx == last &&
+		m.messageRoles[last] == proto.RoleAssistant
+}
+
+func newResponseSpinner(r *lipgloss.Renderer) spinner.Model {
+	sp := spinner.New(spinner.WithSpinner(spinner.Dot))
+	sp.Style = r.NewStyle().Foreground(lipgloss.Color("#6C50FF"))
+	return sp
+}
+
+func (m *Mods) placeSpinnerTopRight(view string) string {
+	if m.width <= 0 {
+		return view
+	}
+	spinnerStr := m.responseSpinner.View()
+	spinnerWidth := lipgloss.Width(spinnerStr)
+	lines := strings.Split(view, "\n")
+	if len(lines) == 0 {
+		return view
+	}
+	firstLineWidth := lipgloss.Width(lines[0])
+	availableWidth := m.width - spinnerWidth
+	if firstLineWidth <= availableWidth {
+		lines[0] = lines[0] + strings.Repeat(" ", availableWidth-firstLineWidth) + spinnerStr
+	} else {
+		lines[0] = m.renderer.NewStyle().MaxWidth(availableWidth).Render(lines[0]) + spinnerStr
+	}
+	return strings.Join(lines, "\n")
 }
 
 // View implements tea.Model.
 func (m *Mods) View() string {
+	if m.interactive {
+		return m.interactiveView()
+	}
+
 	//nolint:exhaustive
 	switch m.state {
 	case errorState:
@@ -230,10 +943,9 @@ func (m *Mods) View() string {
 		}
 	case responseState:
 		if !m.Config.Raw && isOutputTTY() {
-			if m.viewportNeeded() {
-				return m.glamViewport.View()
+			if m.height > 0 {
+				return m.placeSpinnerTopRight(m.glamViewport.View())
 			}
-			// We don't need the viewport yet.
 			return m.glamOutput
 		}
 
@@ -254,6 +966,346 @@ func (m *Mods) View() string {
 		return ""
 	}
 	return ""
+}
+
+// interactiveView renders the interactive mode layout.
+func (m *Mods) interactiveView() string {
+	//nolint:exhaustive
+	switch m.state {
+	case errorState:
+		return ""
+	case doneState:
+		return ""
+	case inputState:
+		if m.historyMode {
+			return m.padToTermHeight(trimViewportBottom(m.glamViewport.View()))
+		}
+
+		// Use focused style when typing, dimmer when in browse mode
+		boxStyle := m.Styles.InputBoxFocused
+		if m.browseMode {
+			boxStyle = m.Styles.InputBoxBlurred
+		}
+
+		var sb strings.Builder
+		// Trim viewport padding so the textarea sits directly below
+		// conversation content instead of being pinned to the bottom.
+		if vp := trimViewportBottom(m.glamViewport.View()); vp != "" {
+			sb.WriteString(vp)
+			// When the last message is a highlighted assistant, the border
+			// bottom already separates content from the input box.
+			if m.browseMode && m.lastMessageIsHighlightedAssistant() {
+				sb.WriteString("\n")
+			} else {
+				sb.WriteString("\n\n") // blank separator line
+			}
+		}
+		sb.WriteString(boxStyle.Width(m.width - 2).Render(m.textarea.View())) //nolint:mnd
+
+		return m.padToTermHeight(sb.String())
+
+	case configLoadedState, requestState:
+		var sb strings.Builder
+		if vp := trimViewportBottom(m.glamViewport.View()); vp != "" {
+			sb.WriteString(vp)
+			sb.WriteString("\n")
+		}
+		if !m.Config.Quiet {
+			sb.WriteString(m.anim.View())
+		}
+		return m.padToTermHeight(sb.String())
+
+	case responseState:
+		return m.padToTermHeight(m.placeSpinnerTopRight(trimViewportBottom(m.glamViewport.View())))
+	}
+	return ""
+}
+
+// padToTermHeight pads the view with empty lines to fill the full terminal
+// height. This ensures every row in the altscreen is overwritten on each
+// frame, preventing ghost artifacts when the terminal shrinks and old wider
+// content wraps into extra visual rows that the renderer doesn't clear.
+func (m *Mods) padToTermHeight(view string) string {
+	if m.height <= 0 {
+		return view
+	}
+	n := strings.Count(view, "\n") + 1
+	if n < m.height {
+		view += strings.Repeat("\n", m.height-n)
+	}
+	return view
+}
+
+// trimViewportBottom removes trailing empty lines from a viewport's rendered
+// output so that elements placed after it sit directly below the content.
+func trimViewportBottom(view string) string {
+	lines := strings.Split(view, "\n")
+	for len(lines) > 0 && strings.TrimSpace(lines[len(lines)-1]) == "" {
+		lines = lines[:len(lines)-1]
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	return strings.Join(lines, "\n")
+}
+
+// textareaVisualLineCount returns the number of visual lines the textarea
+// content occupies, accounting for word wrapping. It uses the same wrapping
+// algorithm as the bubbles textarea (see textareaWrap) so that our height
+// calculation matches the textarea's actual rendering exactly.
+// Results are cached and only recalculated when textarea content or width changes.
+func (m *Mods) textareaVisualLineCount() int {
+	w := m.textarea.Width()
+	if w <= 0 {
+		return m.textarea.LineCount()
+	}
+	val := m.textarea.Value()
+	if w == m.cachedVLCWidth && val == m.cachedVLCValue && m.cachedVLC > 0 {
+		return m.cachedVLC
+	}
+	total := 0
+	for _, line := range strings.Split(val, "\n") {
+		total += len(textareaWrap([]rune(line), w))
+	}
+	if total < 1 {
+		total = 1
+	}
+	m.cachedVLC = total
+	m.cachedVLCWidth = w
+	m.cachedVLCValue = val
+	return total
+}
+
+// textareaWrap is a direct copy of the unexported wrap() function from
+// github.com/charmbracelet/bubbles/textarea. We replicate it here so that
+// textareaVisualLineCount produces results that exactly match the textarea's
+// internal line wrapping, rather than using an approximation.
+func textareaWrap(runes []rune, width int) [][]rune {
+	var (
+		lines  = [][]rune{{}}
+		word   = []rune{}
+		row    int
+		spaces int
+	)
+
+	for _, r := range runes {
+		if unicode.IsSpace(r) {
+			spaces++
+		} else {
+			word = append(word, r)
+		}
+
+		if spaces > 0 { //nolint:nestif
+			if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces > width {
+				row++
+				lines = append(lines, []rune{})
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			} else {
+				lines[row] = append(lines[row], word...)
+				lines[row] = append(lines[row], repeatSpaces(spaces)...)
+				spaces = 0
+				word = nil
+			}
+		} else {
+			lastCharLen := rw.RuneWidth(word[len(word)-1])
+			if uniseg.StringWidth(string(word))+lastCharLen > width {
+				if len(lines[row]) > 0 {
+					row++
+					lines = append(lines, []rune{})
+				}
+				lines[row] = append(lines[row], word...)
+				word = nil
+			}
+		}
+	}
+
+	if uniseg.StringWidth(string(lines[row]))+uniseg.StringWidth(string(word))+spaces >= width {
+		lines = append(lines, []rune{})
+		lines[row+1] = append(lines[row+1], word...)
+		spaces++
+		lines[row+1] = append(lines[row+1], repeatSpaces(spaces)...)
+	} else {
+		lines[row] = append(lines[row], word...)
+		spaces++
+		lines[row] = append(lines[row], repeatSpaces(spaces)...)
+	}
+
+	return lines
+}
+
+func repeatSpaces(n int) []rune {
+	return []rune(strings.Repeat(string(' '), n))
+}
+
+// interactiveTextareaHeight returns the total lines consumed by the textarea
+// area (border + content lines).
+func (m *Mods) interactiveTextareaHeight() int {
+	const borderLines = 2
+	lines := m.textareaVisualLineCount()
+	// Cap so total view (viewport + separator + textarea) fits terminal height.
+	maxContent := m.height - borderLines - 2 //nolint:mnd // 2 = separator + min 1 viewport line
+	if maxContent < 1 {
+		maxContent = 1
+	}
+	if lines > maxContent {
+		lines = maxContent
+	}
+	return lines + borderLines
+}
+
+// syncTextareaHeight adjusts the textarea's internal height to match its
+// content, then recalculates the viewport height. The nil Update triggers
+// repositionView inside the textarea — needed after InsertString (paste,
+// newline) which modifies content without calling repositionView.
+func (m *Mods) syncTextareaHeight() {
+	h := m.interactiveTextareaHeight()
+	m.cachedTextareaHeight = h
+	m.textarea.SetHeight(h - 2) //nolint:mnd // subtract border
+	m.textarea, _ = m.textarea.Update(nil)
+	m.glamViewport.Height = m.interactiveViewportHeight()
+}
+
+// interactiveViewportHeight calculates the viewport height for interactive mode,
+// reserving space for the textarea and the blank separator line between them.
+func (m *Mods) interactiveViewportHeight() int {
+	taHeight := m.cachedTextareaHeight
+	if taHeight == 0 {
+		taHeight = m.interactiveTextareaHeight() // fallback before first sync
+	}
+	const separatorLines = 1 // the "\n\n" between viewport and textarea adds 1 visible blank line
+	vpHeight := m.height - taHeight - separatorLines
+	if vpHeight < 1 {
+		vpHeight = 1
+	}
+	return vpHeight
+}
+
+// appendUserMessageToConversation adds a rendered user message to the conversation.
+func (m *Mods) appendUserMessageToConversation(content string) {
+	rendered := renderUserMessage(content, m.Styles.UserMessage, m.width)
+	m.messageOffsets = append(m.messageOffsets, strings.Count(m.conversationContent, "\n"))
+	m.rawMessages = append(m.rawMessages, content)
+	m.messageRoles = append(m.messageRoles, proto.RoleUser)
+	m.conversationContent += rendered + "\n"
+	m.updateInteractiveViewport()
+}
+
+// appendResponseToConversation adds the completed AI response to the conversation.
+func (m *Mods) appendResponseToConversation() {
+	// Add blank line between user message and response (kept out of
+	// appendUserMessageToConversation so streaming has no extra gap).
+	m.conversationContent += "\n"
+	m.messageOffsets = append(m.messageOffsets, strings.Count(m.conversationContent, "\n"))
+	m.rawMessages = append(m.rawMessages, m.Output)
+	m.messageRoles = append(m.messageRoles, proto.RoleAssistant)
+	if m.glam != nil {
+		glamRendered, err := m.glam.Render(m.Output)
+		if err == nil {
+			glamRendered = strings.TrimFunc(glamRendered, unicode.IsSpace)
+			glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
+			m.conversationContent += glamRendered + "\n\n"
+			m.updateInteractiveViewport()
+			return
+		}
+	}
+	m.conversationContent += m.Output + "\n\n"
+	m.updateInteractiveViewport()
+}
+
+// updateInteractiveViewport updates the viewport content with conversation + current streaming.
+func (m *Mods) updateInteractiveViewport() {
+	wasAtBottom := m.glamViewport.ScrollPercent() >= 1.0 ||
+		m.glamViewport.TotalLineCount() <= m.glamViewport.VisibleLineCount()
+	content := m.conversationContent
+	if m.glamOutput != "" {
+		content += m.glamOutput
+	}
+	m.glamViewport.SetContent(content)
+	m.glamHeight = lipgloss.Height(content)
+	if wasAtBottom {
+		m.glamViewport.GotoBottom()
+	}
+}
+
+// reRenderStreamingOutput re-renders the in-progress streaming output with the
+// current glamour renderer (e.g. after a terminal resize changes word wrap width).
+func (m *Mods) reRenderStreamingOutput() {
+	if m.Output == "" {
+		return
+	}
+	m.glamOutput, _ = m.glam.Render(m.Output)
+	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
+	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
+	m.glamHeight = lipgloss.Height(m.glamOutput)
+	m.glamOutput += "\n"
+}
+
+// reRenderConversation re-renders the entire conversation after a terminal resize or highlight change.
+func (m *Mods) reRenderConversation() {
+	content, offsets, rawMessages, roles := renderConversation(
+		m.messages, m.glam,
+		m.Styles.UserMessage, m.Styles.UserMessageFocused,
+		m.Styles.AssistantMessageFocused,
+		m.width, m.currentMsgIdx, m.yankFlashIdx,
+	)
+	m.conversationContent = content
+	m.messageOffsets = offsets
+	m.rawMessages = rawMessages
+	m.messageRoles = roles
+	m.updateInteractiveViewport()
+}
+
+
+// loadConversationHistory loads and renders existing conversation from cache.
+func (m *Mods) loadConversationHistory() {
+	if m.Config.cacheReadFromID == "" {
+		return
+	}
+	var messages []proto.Message
+	if err := m.cache.Read(m.Config.cacheReadFromID, &messages); err != nil {
+		return
+	}
+	m.messages = messages
+	content, offsets, rawMessages, roles := renderConversation(
+		messages, m.glam,
+		m.Styles.UserMessage, m.Styles.UserMessageFocused,
+		m.Styles.AssistantMessageFocused,
+		m.width, -1, -1,
+	)
+	m.conversationContent = content
+	m.messageOffsets = offsets
+	m.rawMessages = rawMessages
+	m.messageRoles = roles
+	m.updateInteractiveViewport()
+}
+
+// interactiveSave saves the conversation in interactive mode after each exchange.
+func (m *Mods) interactiveSave() {
+	if m.Config.NoCache {
+		return
+	}
+	id := m.Config.cacheWriteToID
+	title := firstLine(firstPrompt(m.messages))
+	if title == "" {
+		title = strings.TrimSpace(m.Config.cacheWriteToTitle)
+	}
+	if title == "" {
+		title = "interactive conversation"
+	}
+	// Truncate title
+	const maxTitleLen = 50
+	if len(title) > maxTitleLen {
+		title = title[:maxTitleLen]
+	}
+	if err := m.cache.Write(id, &m.messages); err != nil {
+		return
+	}
+	_ = m.db.Save(id, title, m.Config.API, m.Config.Model)
+	// Ensure subsequent turns can read from this conversation's cache
+	m.Config.cacheReadFromID = id
 }
 
 func (m *Mods) quit() tea.Msg {
@@ -641,13 +1693,20 @@ func (m *Mods) appendToOutput(s string) {
 		return
 	}
 
-	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
-	oldHeight := m.glamHeight
+	// In interactive mode, only update glamOutput for streaming display.
+	// The viewport content is managed by updateInteractiveViewport.
 	m.glamOutput, _ = m.glam.Render(m.Output)
 	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
 	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
 	m.glamHeight = lipgloss.Height(m.glamOutput)
 	m.glamOutput += "\n"
+
+	if m.interactive {
+		return
+	}
+
+	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
+	oldHeight := m.glamHeight
 	truncatedGlamOutput := m.renderer.NewStyle().
 		MaxWidth(m.width).
 		Render(m.glamOutput)

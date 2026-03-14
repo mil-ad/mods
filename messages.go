@@ -6,6 +6,15 @@ import (
 	"github.com/charmbracelet/mods/internal/proto"
 )
 
+func firstPrompt(messages []proto.Message) string {
+	for _, msg := range messages {
+		if msg.Role == proto.RoleUser && msg.Content != "" {
+			return msg.Content
+		}
+	}
+	return ""
+}
+
 func lastPrompt(messages []proto.Message) string {
 	var result string
 	for _, msg := range messages {

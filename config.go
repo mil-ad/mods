@@ -49,6 +49,7 @@ var help = map[string]string{
 	"max-retries":       "Maximum number of times to retry API calls",
 	"no-limit":          "Turn off the client-side limit on the size of the input into the model",
 	"word-wrap":         "Wrap formatted output at specific width (default is 80)",
+	"dynamic-width":     "Use terminal width for word wrap and re-render on resize",
 	"max-tokens":        "Maximum number of tokens in response",
 	"temp":              "Temperature (randomness) of results, from 0.0 to 2.0, -1.0 to disable",
 	"stop":              "Up to 4 sequences where the API will stop generating further tokens",
@@ -75,6 +76,7 @@ var help = map[string]string{
 	"mcp-list":          "List all available MCP servers",
 	"mcp-list-tools":    "List all available tools from enabled MCP servers",
 	"mcp-timeout":       "Timeout for MCP server calls, defaults to 15 seconds",
+	"interactive":       "Interactive mode: keep a conversation going in the TUI",
 }
 
 // Model represents the LLM model used in the API call.
@@ -159,6 +161,7 @@ type Config struct {
 	IncludePrompt       int        `yaml:"include-prompt" env:"INCLUDE_PROMPT"`
 	MaxRetries          int        `yaml:"max-retries" env:"MAX_RETRIES"`
 	WordWrap            int        `yaml:"word-wrap" env:"WORD_WRAP"`
+	DynamicWidth        bool       `yaml:"dynamic-width" env:"DYNAMIC_WIDTH"`
 	Fanciness           uint       `yaml:"fanciness" env:"FANCINESS"`
 	StatusText          string     `yaml:"status-text" env:"STATUS_TEXT"`
 	HTTPProxy           string     `yaml:"http-proxy" env:"HTTP_PROXY"`
@@ -185,6 +188,8 @@ type Config struct {
 	Delete              []string
 	DeleteOlderThan     time.Duration
 	User                string
+
+	Interactive bool
 
 	MCPServers   map[string]MCPServerConfig `yaml:"mcp-servers"`
 	MCPList      bool

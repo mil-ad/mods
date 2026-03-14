@@ -80,13 +80,23 @@ var (
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config.Prefix = removeWhitespace(strings.Join(args, " "))
 
+			// Interactive mode forces dynamic width and disables raw
+			if config.Interactive {
+				config.DynamicWidth = true
+				config.Raw = false
+			}
+
 			opts := []tea.ProgramOption{}
 
-			if !isInputTTY() || config.Raw {
+			if config.Raw {
 				opts = append(opts, tea.WithInput(nil))
 			}
-			if isOutputTTY() && !config.Raw {
+			if config.Interactive {
+				opts = append(opts, tea.WithAltScreen())
+				opts = append(opts, tea.WithMouseCellMotion())
+			} else if isOutputTTY() && !config.Raw {
 				opts = append(opts, tea.WithOutput(os.Stderr))
+				opts = append(opts, tea.WithMouseCellMotion())
 			} else {
 				opts = append(opts, tea.WithoutRenderer())
 			}
@@ -94,7 +104,7 @@ var (
 				config.Quiet = true
 			}
 
-			if isNoArgs() && isInputTTY() && config.openEditor {
+			if !config.Interactive && isNoArgs() && isInputTTY() && config.openEditor {
 				prompt, err := prefixFromEditor()
 				if err != nil {
 					return err
@@ -102,7 +112,7 @@ var (
 				config.Prefix = prompt
 			}
 
-			if (isNoArgs() || config.AskModel) && isInputTTY() {
+			if !config.Interactive && (isNoArgs() || config.AskModel) && isInputTTY() {
 				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
 					return modsError{
 						err:    err,
@@ -112,6 +122,32 @@ var (
 					return modsError{
 						err:    err,
 						reason: "Prompt failed.",
+					}
+				}
+			}
+
+			// Interactive mode with --ask-model: show model picker before starting
+			if config.Interactive && config.AskModel {
+				if err := askInfo(); err != nil && err == huh.ErrUserAborted {
+					return modsError{
+						err:    err,
+						reason: "User canceled.",
+					}
+				} else if err != nil {
+					return modsError{
+						err:    err,
+						reason: "Prompt failed.",
+					}
+				}
+			}
+
+			// Interactive mode with --list: show conversation picker before starting
+			if config.Interactive && config.List {
+				config.List = false
+				conversations, _ := db.List()
+				if len(conversations) > 0 {
+					if selected := pickConversation(conversations); selected != "" {
+						config.Continue = selected
 					}
 				}
 			}
@@ -177,7 +213,7 @@ var (
 				return resetSettings()
 			}
 
-			if mods.Input == "" && isNoArgs() {
+			if mods.Input == "" && isNoArgs() && !config.Interactive {
 				return modsError{
 					reason: "You haven't provided any prompt input.",
 					err: newUserErrorf(
@@ -216,6 +252,11 @@ var (
 
 			if config.DeleteOlderThan > 0 {
 				return deleteConversationOlderThan()
+			}
+
+			// Interactive mode handles its own display and saving
+			if config.Interactive {
+				return nil
 			}
 
 			// raw mode already prints the output, no need to print it again
@@ -269,6 +310,7 @@ func initFlags() {
 	flags.BoolVar(&config.NoLimit, "no-limit", config.NoLimit, stdoutStyles().FlagDesc.Render(help["no-limit"]))
 	flags.Int64Var(&config.MaxTokens, "max-tokens", config.MaxTokens, stdoutStyles().FlagDesc.Render(help["max-tokens"]))
 	flags.IntVar(&config.WordWrap, "word-wrap", config.WordWrap, stdoutStyles().FlagDesc.Render(help["word-wrap"]))
+	flags.BoolVar(&config.DynamicWidth, "dynamic-width", config.DynamicWidth, stdoutStyles().FlagDesc.Render(help["dynamic-width"]))
 	flags.Float64Var(&config.Temperature, "temp", config.Temperature, stdoutStyles().FlagDesc.Render(help["temp"]))
 	flags.StringArrayVar(&config.Stop, "stop", config.Stop, stdoutStyles().FlagDesc.Render(help["stop"]))
 	flags.Float64Var(&config.TopP, "topp", config.TopP, stdoutStyles().FlagDesc.Render(help["topp"]))
@@ -283,6 +325,7 @@ func initFlags() {
 	flags.BoolVar(&config.ListRoles, "list-roles", config.ListRoles, stdoutStyles().FlagDesc.Render(help["list-roles"]))
 	flags.StringVar(&config.Theme, "theme", "charm", stdoutStyles().FlagDesc.Render(help["theme"]))
 	flags.BoolVarP(&config.openEditor, "editor", "e", false, stdoutStyles().FlagDesc.Render(help["editor"]))
+	flags.BoolVarP(&config.Interactive, "interactive", "i", false, stdoutStyles().FlagDesc.Render(help["interactive"]))
 	flags.BoolVar(&config.MCPList, "mcp-list", false, stdoutStyles().FlagDesc.Render(help["mcp-list"]))
 	flags.BoolVar(&config.MCPListTools, "mcp-list-tools", false, stdoutStyles().FlagDesc.Render(help["mcp-list-tools"]))
 	flags.StringArrayVar(&config.MCPDisable, "mcp-disable", nil, stdoutStyles().FlagDesc.Render(help["mcp-disable"]))
@@ -667,6 +710,23 @@ func makeOptions(conversations []Conversation) []huh.Option[string] {
 		opts = append(opts, huh.NewOption(left+" "+right, c.ID))
 	}
 	return opts
+}
+
+func pickConversation(conversations []Conversation) string {
+	var selected string
+	opts := []huh.Option[string]{huh.NewOption("New conversation", "")}
+	opts = append(opts, makeOptions(conversations)...)
+	if err := huh.NewForm(
+		huh.NewGroup(
+			huh.NewSelect[string]().
+				Title("Conversations").
+				Value(&selected).
+				Options(opts...),
+		),
+	).Run(); err != nil {
+		return ""
+	}
+	return selected
 }
 
 func selectFromList(conversations []Conversation) {
