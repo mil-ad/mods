@@ -20,6 +20,7 @@ require (
 	github.com/charmbracelet/x/exp/ordered v0.1.0
 	github.com/charmbracelet/x/exp/strings v0.1.0
 	github.com/cohere-ai/cohere-go/v2 v2.16.2
+	github.com/gen2brain/malgo v0.11.24
 	github.com/jmoiron/sqlx v1.4.0
 	github.com/lucasb-eyer/go-colorful v1.3.0
 	github.com/mark3labs/mcp-go v0.45.0

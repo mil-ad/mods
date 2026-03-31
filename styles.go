@@ -31,7 +31,8 @@ type styles struct {
 	UserMessageFocused,
 	AssistantMessageFocused,
 	InputBoxFocused,
-	InputBoxBlurred lipgloss.Style
+	InputBoxBlurred,
+	RecordingIndicator lipgloss.Style
 }
 
 func makeStyles(r *lipgloss.Renderer) (s styles) {
@@ -81,6 +82,9 @@ func makeStyles(r *lipgloss.Renderer) (s styles) {
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(lipgloss.Color("#555555")).
 		Padding(0, 1)
+	s.RecordingIndicator = r.NewStyle().
+		Foreground(lipgloss.Color("#FF5F5F")).
+		Bold(true)
 	return s
 }
 

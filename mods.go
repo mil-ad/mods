@@ -30,6 +30,7 @@ import (
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/mods/internal/anthropic"
+	"github.com/charmbracelet/mods/internal/audio"
 	"github.com/charmbracelet/mods/internal/cache"
 	"github.com/charmbracelet/mods/internal/cohere"
 	"github.com/charmbracelet/mods/internal/google"
@@ -106,6 +107,16 @@ type Mods struct {
 	historyMode          bool
 	historyConversations []Conversation
 	historySelectedIdx   int
+
+	// Push-to-talk fields
+	pttHolding    bool
+	pttRecording  bool
+	pttStopping   bool
+	pttFirstPress time.Time
+	pttLastPress  time.Time
+	pttPressCount int
+	pttRecorder   *audio.Recorder
+	pttCooldown   time.Time
 }
 
 // resolveGlamourStyle determines the glamour style name once. It respects the
@@ -403,6 +414,12 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		}
 		return m, nil
+	case pttReleaseCheckMsg:
+		return m.handlePTTReleaseCheck()
+	case pttRecordingStartedMsg:
+		return m.handlePTTRecordingStarted(msg)
+	case pttRecordingDoneMsg:
+		return m.handlePTTRecordingDone(msg)
 	case tea.MouseMsg:
 		if m.interactive && m.historyMode {
 			return m.handleHistoryModeMouse(msg)
@@ -496,6 +513,11 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			}
 			return m, func() tea.Msg {
 				return textareaSubmitMsg{content: content}
+			}
+		case "]":
+			mod, cmd, consumed := m.handlePTTKey()
+			if consumed {
+				return mod, cmd
 			}
 		}
 		// Filter terminal escape sequence noise before passing to textarea
@@ -1000,7 +1022,13 @@ func (m *Mods) interactiveView() string {
 				sb.WriteString("\n\n") // blank separator line
 			}
 		}
-		sb.WriteString(boxStyle.Width(m.width - 2).Render(m.textarea.View())) //nolint:mnd
+		if m.pttRecording {
+			rec := m.Styles.RecordingIndicator.Render("● REC") + " " +
+				m.Styles.Comment.Render("recording... release ] to stop")
+			sb.WriteString(rec + "\n")
+		} else {
+			sb.WriteString(boxStyle.Width(m.width - 2).Render(m.textarea.View())) //nolint:mnd
+		}
 
 		return m.padToTermHeight(sb.String())
 
@@ -1309,6 +1337,7 @@ func (m *Mods) interactiveSave() {
 }
 
 func (m *Mods) quit() tea.Msg {
+	m.pttCleanup()
 	for _, cancel := range m.cancelRequest {
 		cancel()
 	}
