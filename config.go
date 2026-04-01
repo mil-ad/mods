@@ -191,6 +191,10 @@ type Config struct {
 
 	Interactive bool
 
+	TranscriptionAPIBaseURL string `yaml:"transcription-api-base-url" env:"TRANSCRIPTION_API_BASE_URL"`
+	TranscriptionAPIKey     string `yaml:"transcription-api-key" env:"TRANSCRIPTION_API_KEY"`
+	TranscriptionModel      string `yaml:"transcription-model" env:"TRANSCRIPTION_MODEL"`
+
 	MCPServers   map[string]MCPServerConfig `yaml:"mcp-servers"`
 	MCPList      bool
 	MCPListTools bool

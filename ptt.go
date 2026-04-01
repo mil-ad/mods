@@ -1,9 +1,15 @@
 package main
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"os"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/openai/openai-go"
+	"github.com/openai/openai-go/option"
 
 	"github.com/charmbracelet/mods/internal/audio"
 )
@@ -21,17 +27,39 @@ type pttRecordingStartedMsg struct {
 	recorder *audio.Recorder
 }
 
-// pttRecordingDoneMsg signals that recording stopped and the WAV file was saved.
+// pttRecordingDoneMsg signals that recording stopped and transcription completed.
 type pttRecordingDoneMsg struct {
+	text     string
 	filePath string
 	duration time.Duration
 	err      error
+}
+
+// checkTranscriptionServer probes the transcription API with a short timeout.
+// Returns true if the server is reachable.
+func checkTranscriptionServer(baseURL string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	if err != nil {
+		return false
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return false
+	}
+	resp.Body.Close()
+	return true
 }
 
 // handlePTTKey handles a "]" keypress for push-to-talk hold detection.
 // Returns the updated model and command. The second bool is true if the key
 // was consumed by PTT logic (caller should not pass it to the textarea).
 func (m *Mods) handlePTTKey() (tea.Model, tea.Cmd, bool) {
+	if !m.pttEnabled {
+		return m, nil, false
+	}
+
 	now := time.Now()
 
 	// Suppress all ] keypresses while stopping or during cooldown.
@@ -105,7 +133,7 @@ func (m *Mods) handlePTTRecordingStarted(msg pttRecordingStartedMsg) (tea.Model,
 	return m, nil
 }
 
-// handlePTTRecordingDone processes a completed recording.
+// handlePTTRecordingDone processes a completed recording/transcription.
 func (m *Mods) handlePTTRecordingDone(msg pttRecordingDoneMsg) (tea.Model, tea.Cmd) {
 	m.pttHolding = false
 	m.pttRecording = false
@@ -115,14 +143,16 @@ func (m *Mods) handlePTTRecordingDone(msg pttRecordingDoneMsg) (tea.Model, tea.C
 	m.pttCooldown = time.Now()
 
 	if msg.err != nil {
-		e := modsError{err: msg.err, reason: "push-to-talk recording failed"}
-		m.Error = &e
-		m.state = errorState
+		// Don't leave interactive mode on transcription errors — just
+		// show the error in the textarea so the user can keep going.
+		m.textarea.InsertString("[error: " + msg.err.Error() + "]")
+		m.syncTextareaHeight()
 		return m, nil
 	}
 
-	// Insert the file path into the textarea so the user can see it.
-	m.textarea.InsertString("[recording: " + msg.filePath + "]")
+	if msg.text != "" {
+		m.textarea.InsertString(msg.text)
+	}
 	m.syncTextareaHeight()
 	return m, nil
 }
@@ -159,6 +189,7 @@ func startPTTRecordingCmd() tea.Cmd {
 
 func (m *Mods) stopPTTRecordingCmd() tea.Cmd {
 	rec := m.pttRecorder
+	cfg := m.Config
 	m.pttRecorder = nil
 	m.pttRecording = false
 	m.pttStopping = true
@@ -167,6 +198,70 @@ func (m *Mods) stopPTTRecordingCmd() tea.Cmd {
 			return pttRecordingDoneMsg{err: nil}
 		}
 		path, dur, err := rec.StopAndSave()
-		return pttRecordingDoneMsg{filePath: path, duration: dur, err: err}
+		if err != nil {
+			return pttRecordingDoneMsg{err: err}
+		}
+
+		// If no transcription API is configured, just return the file path.
+		if cfg.TranscriptionAPIBaseURL == "" {
+			return pttRecordingDoneMsg{
+				text:     "[recording: " + path + "]",
+				filePath: path,
+				duration: dur,
+			}
+		}
+
+		text, err := transcribeAudio(cfg, path)
+		if err != nil {
+			return pttRecordingDoneMsg{err: fmt.Errorf("transcription: %w", err)}
+		}
+
+		// Clean up the temp WAV file after successful transcription.
+		_ = os.Remove(path)
+
+		return pttRecordingDoneMsg{
+			text:     text,
+			filePath: path,
+			duration: dur,
+		}
 	}
+}
+
+// transcribeAudio sends the WAV file to the configured transcription API and returns the text.
+func transcribeAudio(cfg *Config, wavPath string) (string, error) {
+	f, err := os.Open(wavPath)
+	if err != nil {
+		return "", fmt.Errorf("open recording: %w", err)
+	}
+	defer f.Close()
+
+	opts := []option.RequestOption{
+		option.WithBaseURL(cfg.TranscriptionAPIBaseURL),
+	}
+
+	apiKey := cfg.TranscriptionAPIKey
+	if apiKey == "" {
+		apiKey = "sk-no-key-required"
+	}
+	opts = append(opts, option.WithAPIKey(apiKey))
+
+	client := openai.NewClient(opts...)
+
+	model := cfg.TranscriptionModel
+	if model == "" {
+		model = "whisper-1"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	resp, err := client.Audio.Transcriptions.New(ctx, openai.AudioTranscriptionNewParams{
+		File:  f,
+		Model: openai.AudioModel(model),
+	})
+	if err != nil {
+		return "", err
+	}
+
+	return resp.Text, nil
 }

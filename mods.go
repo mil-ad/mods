@@ -109,6 +109,7 @@ type Mods struct {
 	historySelectedIdx   int
 
 	// Push-to-talk fields
+	pttEnabled    bool // true if transcription server was reachable at startup
 	pttHolding    bool
 	pttRecording  bool
 	pttStopping   bool
@@ -183,6 +184,9 @@ func newMods(
 			m.textarea.SetWidth(width - 6) //nolint:mnd
 		}
 		m.syncTextareaHeight()
+		if cfg.TranscriptionAPIBaseURL != "" {
+			m.pttEnabled = checkTranscriptionServer(cfg.TranscriptionAPIBaseURL)
+		}
 	}
 	return m
 }
@@ -1022,13 +1026,15 @@ func (m *Mods) interactiveView() string {
 				sb.WriteString("\n\n") // blank separator line
 			}
 		}
+		var inputContent string
 		if m.pttRecording {
-			rec := m.Styles.RecordingIndicator.Render("● REC") + " " +
-				m.Styles.Comment.Render("recording... release ] to stop")
-			sb.WriteString(rec + "\n")
+			inputContent = m.Styles.RecordingIndicator.Render("● REC")
+		} else if m.pttStopping {
+			inputContent = m.Styles.Comment.Render("Transcribing...")
 		} else {
-			sb.WriteString(boxStyle.Width(m.width - 2).Render(m.textarea.View())) //nolint:mnd
+			inputContent = m.textarea.View()
 		}
+		sb.WriteString(boxStyle.Width(m.width - 2).Render(inputContent)) //nolint:mnd
 
 		return m.padToTermHeight(sb.String())
 
