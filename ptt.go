@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,10 +18,15 @@ import (
 const (
 	pttHoldThreshold  = 300 * time.Millisecond
 	pttReleaseTimeout = 500 * time.Millisecond
+	pttRecIndicator   = "● REC"
+	pttTransIndicator = "transcribing..."
 )
 
 // pttReleaseCheckMsg is sent by a tick to check if the ] key was released.
 type pttReleaseCheckMsg struct{}
+
+// pttBlinkMsg toggles the recording indicator dot.
+type pttBlinkMsg struct{}
 
 // pttRecordingStartedMsg signals that audio capture started successfully.
 type pttRecordingStartedMsg struct {
@@ -130,7 +136,10 @@ func (m *Mods) handlePTTReleaseCheck() (tea.Model, tea.Cmd) {
 func (m *Mods) handlePTTRecordingStarted(msg pttRecordingStartedMsg) (tea.Model, tea.Cmd) {
 	m.pttRecording = true
 	m.pttRecorder = msg.recorder
-	return m, nil
+	m.pttBlinkOn = true
+	m.textarea.InsertString(pttRecIndicator)
+	m.syncTextareaHeight()
+	return m, pttBlinkTick()
 }
 
 // handlePTTRecordingDone processes a completed recording/transcription.
@@ -142,9 +151,9 @@ func (m *Mods) handlePTTRecordingDone(msg pttRecordingDoneMsg) (tea.Model, tea.C
 	m.pttPressCount = 0
 	m.pttCooldown = time.Now()
 
+	m.pttReplaceIndicator(pttTransIndicator, "")
+
 	if msg.err != nil {
-		// Don't leave interactive mode on transcription errors — just
-		// show the error in the textarea so the user can keep going.
 		m.textarea.InsertString("[error: " + msg.err.Error() + "]")
 		m.syncTextareaHeight()
 		return m, nil
@@ -165,6 +174,23 @@ func (m *Mods) pttCleanup() {
 	}
 	m.pttRecording = false
 	m.pttHolding = false
+}
+
+// pttReplaceIndicator swaps old for repl in the textarea value.
+func (m *Mods) pttReplaceIndicator(old, repl string) {
+	v := m.textarea.Value()
+	if idx := strings.LastIndex(v, old); idx >= 0 {
+		m.textarea.SetValue(v[:idx] + repl + v[idx+len(old):])
+		// Move cursor to end so new text inserts after the indicator.
+		m.textarea.CursorEnd()
+		m.syncTextareaHeight()
+	}
+}
+
+func pttBlinkTick() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg {
+		return pttBlinkMsg{}
+	})
 }
 
 func pttReleaseTick() tea.Cmd {
@@ -193,6 +219,7 @@ func (m *Mods) stopPTTRecordingCmd() tea.Cmd {
 	m.pttRecorder = nil
 	m.pttRecording = false
 	m.pttStopping = true
+	m.pttReplaceIndicator(pttRecIndicator, pttTransIndicator)
 	return func() tea.Msg {
 		if rec == nil {
 			return pttRecordingDoneMsg{err: nil}

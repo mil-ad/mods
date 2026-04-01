@@ -118,6 +118,7 @@ type Mods struct {
 	pttPressCount int
 	pttRecorder   *audio.Recorder
 	pttCooldown   time.Time
+	pttBlinkOn    bool
 }
 
 // resolveGlamourStyle determines the glamour style name once. It respects the
@@ -420,6 +421,12 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case pttReleaseCheckMsg:
 		return m.handlePTTReleaseCheck()
+	case pttBlinkMsg:
+		if !m.pttRecording {
+			return m, nil
+		}
+		m.pttBlinkOn = !m.pttBlinkOn
+		return m, pttBlinkTick()
 	case pttRecordingStartedMsg:
 		return m.handlePTTRecordingStarted(msg)
 	case pttRecordingDoneMsg:
@@ -1026,15 +1033,18 @@ func (m *Mods) interactiveView() string {
 				sb.WriteString("\n\n") // blank separator line
 			}
 		}
-		var inputContent string
+		taView := m.textarea.View()
 		if m.pttRecording {
-			inputContent = m.Styles.RecordingIndicator.Render("● REC")
+			dot := "●"
+			if !m.pttBlinkOn {
+				dot = " "
+			}
+			styled := m.Styles.RecordingIndicator.Render(dot+" REC")
+			taView = strings.Replace(taView, pttRecIndicator, styled, 1)
 		} else if m.pttStopping {
-			inputContent = m.Styles.Comment.Render("Transcribing...")
-		} else {
-			inputContent = m.textarea.View()
+			taView = strings.Replace(taView, pttTransIndicator, m.Styles.Comment.Render(pttTransIndicator), 1)
 		}
-		sb.WriteString(boxStyle.Width(m.width - 2).Render(inputContent)) //nolint:mnd
+		sb.WriteString(boxStyle.Width(m.width - 2).Render(taView)) //nolint:mnd
 
 		return m.padToTermHeight(sb.String())
 
