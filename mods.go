@@ -106,6 +106,11 @@ type Mods struct {
 	historyMode          bool
 	historyConversations []Conversation
 	historySelectedIdx   int
+
+	// Paste placeholder fields: marker string -> original pasted text.
+	// Large multi-line pastes are collapsed to a marker in the textarea and
+	// expanded back to their full text on submit.
+	pastes map[string]string
 }
 
 // resolveGlamourStyle determines the glamour style name once. It respects the
@@ -317,6 +322,7 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		m.textarea.Reset()
+		m.clearPastes()
 		m.syncTextareaHeight()
 		m.browseMode = false
 
@@ -455,6 +461,12 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if m.browseMode {
 			return m.handleBrowseModeKey(msg)
 		}
+		// Bracketed paste arrives as a single KeyMsg with Paste set. Route it
+		// through insertPaste so large multi-line pastes get collapsed.
+		if msg.Paste {
+			m.insertPaste(string(msg.Runes))
+			return m, nil
+		}
 		switch msg.String() {
 		case "ctrl+c", "ctrl+d":
 			m.state = doneState
@@ -479,8 +491,7 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// after insertion. The textarea's built-in Paste is async and
 			// the height sync gets lost.
 			if str, err := clipboard.ReadAll(); err == nil && str != "" {
-				m.textarea.InsertString(str)
-				m.syncTextareaHeight()
+				m.insertPaste(str)
 			}
 			return m, nil
 		case "ctrl+j":
@@ -490,12 +501,18 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.syncTextareaHeight()
 			return m, nil
 		case "enter":
-			content := m.textarea.Value()
+			content := m.expandPastes(m.textarea.Value())
 			if strings.TrimSpace(content) == "" {
 				return m, nil
 			}
 			return m, func() tea.Msg {
 				return textareaSubmitMsg{content: content}
+			}
+		case "backspace", "ctrl+h", "ctrl+w", "alt+backspace":
+			// Delete a collapsed paste marker as a single unit when the cursor
+			// sits right after one; otherwise fall through to normal deletion.
+			if m.deletePasteMarkerBackward() {
+				return m, nil
 			}
 		}
 		// Filter terminal escape sequence noise before passing to textarea
