@@ -185,9 +185,6 @@ func newMods(
 			m.textarea.SetWidth(width - 6) //nolint:mnd
 		}
 		m.syncTextareaHeight()
-		if cfg.TranscriptionAPIBaseURL != "" {
-			m.pttEnabled = checkTranscriptionServer(cfg.TranscriptionAPIBaseURL)
-		}
 	}
 	return m
 }
@@ -240,7 +237,11 @@ type completionOutput struct {
 
 // Init implements tea.Model.
 func (m *Mods) Init() tea.Cmd {
-	return m.findCacheOpsDetails()
+	cmds := []tea.Cmd{m.findCacheOpsDetails()}
+	if m.interactive && m.Config.TranscriptionAPIBaseURL != "" {
+		cmds = append(cmds, checkPTTServerCmd(m.Config.TranscriptionAPIBaseURL))
+	}
+	return tea.Batch(cmds...)
 }
 
 // Update implements tea.Model.
@@ -418,6 +419,9 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.reRenderOutput()
 			}
 		}
+		return m, nil
+	case pttServerCheckMsg:
+		m.pttEnabled = msg.available
 		return m, nil
 	case pttReleaseCheckMsg:
 		return m.handlePTTReleaseCheck()

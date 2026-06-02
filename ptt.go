@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -28,6 +29,11 @@ type pttReleaseCheckMsg struct{}
 // pttBlinkMsg toggles the recording indicator dot.
 type pttBlinkMsg struct{}
 
+// pttServerCheckMsg carries the result of the startup health check.
+type pttServerCheckMsg struct {
+	available bool
+}
+
 // pttRecordingStartedMsg signals that audio capture started successfully.
 type pttRecordingStartedMsg struct {
 	recorder *audio.Recorder
@@ -41,12 +47,25 @@ type pttRecordingDoneMsg struct {
 	err      error
 }
 
-// checkTranscriptionServer probes the transcription API with a short timeout.
-// Returns true if the server is reachable.
+// checkPTTServerCmd asynchronously probes the transcription server's /health
+// endpoint and returns a pttServerCheckMsg with the result.
+func checkPTTServerCmd(baseURL string) tea.Cmd {
+	return func() tea.Msg {
+		return pttServerCheckMsg{available: checkTranscriptionServer(baseURL)}
+	}
+}
+
+// checkTranscriptionServer probes the transcription API's /health endpoint.
+// Returns true if the server is reachable and healthy.
 func checkTranscriptionServer(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	if err != nil {
+		return false
+	}
+	u.Path = "/health"
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, baseURL, nil)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)
 	if err != nil {
 		return false
 	}
@@ -55,7 +74,7 @@ func checkTranscriptionServer(baseURL string) bool {
 		return false
 	}
 	resp.Body.Close()
-	return true
+	return resp.StatusCode == http.StatusOK
 }
 
 // handlePTTKey handles a "]" keypress for push-to-talk hold detection.
