@@ -158,6 +158,11 @@ var (
 			}
 			mods := newMods(cmd.Context(), stderrRenderer(), &config, db, cache)
 			p := tea.NewProgram(mods, opts...)
+			// Let background LaTeX renders nudge the program to re-render once
+			// their images are ready.
+			if mods.math != nil {
+				mods.math.notify = func() { p.Send(mathReadyMsg{}) }
+			}
 			m, err := p.Run()
 			if err != nil {
 				return modsError{err, "Couldn't start Bubble Tea program."}

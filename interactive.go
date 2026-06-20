@@ -53,6 +53,33 @@ func renderUserMessage(content string, style lipgloss.Style, width int) string {
 	return style.Render(strings.TrimSpace(content))
 }
 
+// renderAssistantMarkdown renders an assistant message to ANSI via glamour,
+// swapping block-math spans for kitty placeholder grids when math is non-nil.
+// Returns the rendered string and whether rendering succeeded (false falls back
+// to plain text at the call site). Callers apply their own whitespace trimming.
+func renderAssistantMarkdown(glam *glamour.TermRenderer, math *mathRenderer, content string) (string, bool) {
+	if glam == nil {
+		return "", false
+	}
+	renderContent := content
+	var grids map[int]string
+	if math != nil {
+		// Extract block math to sentinels before glamour (which has no math
+		// support), then swap in placeholder grids after.
+		processed, formulas := extractBlockMath(content)
+		renderContent = processed
+		grids = math.render(formulas)
+	}
+	rendered, err := glam.Render(renderContent)
+	if err != nil {
+		return "", false
+	}
+	if math != nil {
+		rendered = substituteMath(rendered, grids)
+	}
+	return rendered, true
+}
+
 // renderConversation renders the full conversation history with styled user
 // messages and glamour-rendered AI responses. Returns the rendered content,
 // line offsets for each message, raw text, and roles.
@@ -61,6 +88,7 @@ func renderUserMessage(content string, style lipgloss.Style, width int) string {
 func renderConversation(
 	messages []proto.Message,
 	glam *glamour.TermRenderer,
+	math *mathRenderer,
 	userStyle lipgloss.Style,
 	userStyleFocused lipgloss.Style,
 	assistantStyleFocused lipgloss.Style,
@@ -125,28 +153,25 @@ func renderConversation(
 
 			highlighted := vm.idx == highlightIdx
 			flashing := vm.idx == yankFlashIdx && yankFlashIdx >= 0
-			if glam != nil {
-				glamRendered, err := glam.Render(vm.msg.Content)
-				if err == nil {
-					glamRendered = strings.TrimFunc(glamRendered, func(r rune) bool {
-						return r == '\n' || r == '\r' || r == ' ' || r == '\t'
-					})
-					glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
-					if highlighted {
-						glamRendered = renderAssistantFocused(glamRendered, assistantStyleFocused, width)
-					}
-					if flashing {
-						glamRendered = flashLines(glamRendered, width)
-					}
-					sb.WriteString(glamRendered)
-					// Border bottom replaces blank line when highlighted.
-					if highlighted {
-						sb.WriteString("\n")
-					} else {
-						sb.WriteString("\n\n")
-					}
-					continue
+			if glamRendered, ok := renderAssistantMarkdown(glam, math, vm.msg.Content); ok {
+				glamRendered = strings.TrimFunc(glamRendered, func(r rune) bool {
+					return r == '\n' || r == '\r' || r == ' ' || r == '\t'
+				})
+				glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
+				if highlighted {
+					glamRendered = renderAssistantFocused(glamRendered, assistantStyleFocused, width)
 				}
+				if flashing {
+					glamRendered = flashLines(glamRendered, width)
+				}
+				sb.WriteString(glamRendered)
+				// Border bottom replaces blank line when highlighted.
+				if highlighted {
+					sb.WriteString("\n")
+				} else {
+					sb.WriteString("\n\n")
+				}
+				continue
 			}
 			// Fallback: render as plain text
 			txt := vm.msg.Content
