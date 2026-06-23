@@ -9,6 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 )
 
 // This file implements the kitty terminal graphics protocol using Unicode
@@ -31,13 +32,35 @@ const transmitChunkSize = 4096
 var diacriticsRaw string
 
 // isKittyTerminal reports whether the terminal supports the kitty graphics
-// protocol (kitty itself or compatible emulators such as ghostty).
-func isKittyTerminal() bool {
+// protocol (kitty itself or compatible emulators such as ghostty). It is
+// detected once and cached.
+//
+// Detection queries the terminal's name via XTGETTCAP (the "TN" capability),
+// which — unlike $TERM or $KITTY_WINDOW_ID — is reported by the real terminal
+// even across SSH and tmux. The environment is used as a fallback when the
+// query is unsupported or unavailable (e.g. non-unix platforms).
+var isKittyTerminal = sync.OnceValue(func() bool {
+	if name, ok := queryTerminalName(); ok {
+		if isGraphicsTerminalName(name) {
+			return true
+		}
+	}
+	return envIndicatesGraphicsTerminal()
+})
+
+// isGraphicsTerminalName reports whether a terminal name denotes kitty/ghostty.
+func isGraphicsTerminalName(name string) bool {
+	n := strings.ToLower(name)
+	return strings.Contains(n, "kitty") || strings.Contains(n, "ghostty")
+}
+
+// envIndicatesGraphicsTerminal checks environment variables as a fallback signal.
+func envIndicatesGraphicsTerminal() bool {
 	if os.Getenv("KITTY_WINDOW_ID") != "" {
 		return true
 	}
-	term := os.Getenv("TERM")
-	return strings.Contains(term, "kitty") || strings.Contains(term, "ghostty")
+	return isGraphicsTerminalName(os.Getenv("TERM")) ||
+		isGraphicsTerminalName(os.Getenv("TERM_PROGRAM"))
 }
 
 // parseDiacritics returns the ordered combining runes used to encode row/column
