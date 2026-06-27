@@ -112,9 +112,13 @@ type Mods struct {
 	// expanded back to their full text on submit.
 	pastes map[string]string
 
-	// math renders LaTeX block math as kitty images in interactive mode. nil
-	// when disabled or the terminal lacks graphics support.
+	// math renders LaTeX block math as kitty images. nil when disabled or the
+	// terminal lacks graphics support.
 	math *mathRenderer
+	// streamDone marks that a non-interactive response has finished streaming and
+	// the program is only waiting for outstanding LaTeX image fetches before it
+	// quits and prints the final output.
+	streamDone bool
 }
 
 // resolveGlamourStyle determines the glamour style name once. It respects the
@@ -181,11 +185,13 @@ func newMods(
 			m.textarea.SetWidth(width - 6) //nolint:mnd
 		}
 		m.syncTextareaHeight()
-		// Render LaTeX block math as inline images when the terminal supports
-		// the kitty graphics protocol.
-		if isKittyTerminal() {
-			m.math = newMathRenderer(ctx)
-		}
+	}
+	// Render LaTeX block math as images when enabled and the terminal supports
+	// the kitty graphics protocol — in interactive mode, or when streaming to a
+	// (non-raw) TTY.
+	if cfg.RenderLatex && isKittyTerminal() &&
+		(cfg.Interactive || (isOutputTTY() && !cfg.Raw)) {
+		m.math = newMathRenderer(ctx)
 	}
 	return m
 }
@@ -200,6 +206,25 @@ func (m *Mods) updateGlamRenderer(width int) {
 	m.glam = gr
 }
 
+// truncateToWidth clips each line of s to the terminal width, but leaves lines
+// containing a kitty image placeholder untouched: their cell counts encode the
+// image geometry and must not be altered by (necessarily imperfect) width
+// measurement of the placeholder rune and its combining diacritics.
+func (m *Mods) truncateToWidth(s string) string {
+	if m.width <= 0 {
+		return s
+	}
+	style := m.renderer.NewStyle().MaxWidth(m.width)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if strings.ContainsRune(line, placeholderRune) {
+			continue
+		}
+		lines[i] = style.Render(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // reRenderOutput re-renders the current output with the current glamour settings.
 func (m *Mods) reRenderOutput() {
 	if !isOutputTTY() || m.Config.Raw || m.Output == "" {
@@ -207,15 +232,16 @@ func (m *Mods) reRenderOutput() {
 	}
 
 	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
-	m.glamOutput, _ = m.glam.Render(m.Output)
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+		m.glamOutput = rendered
+	} else {
+		m.glamOutput = m.Output
+	}
 	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
 	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
 	m.glamHeight = lipgloss.Height(m.glamOutput)
 	m.glamOutput += "\n"
-	truncatedGlamOutput := m.renderer.NewStyle().
-		MaxWidth(m.width).
-		Render(m.glamOutput)
-	m.glamViewport.SetContent(truncatedGlamOutput)
+	m.glamViewport.SetContent(m.truncateToWidth(m.glamOutput))
 	if wasAtBottom {
 		m.glamViewport.GotoBottom()
 	}
@@ -367,6 +393,13 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.textarea.Focus())
 				return m, tea.Batch(cmds...)
 			}
+			// Non-interactive: if an image from the final chunk is still being
+			// fetched, wait for it (a mathReadyMsg will quit once it lands) so the
+			// printed output isn't missing an equation.
+			m.streamDone = true
+			if m.math != nil && m.math.pending() {
+				return m, tea.Batch(cmds...)
+			}
 			m.state = doneState
 			return m, m.quit
 		}
@@ -395,6 +428,16 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case mathReadyMsg:
 		// A background formula render finished; re-render so the now-cached
 		// image is transmitted and its placeholder grid appears.
+		if !m.interactive {
+			m.reRenderOutput()
+			// If the stream is over and all images are in, quit and let the
+			// final output (with images) print.
+			if m.streamDone && (m.math == nil || !m.math.pending()) {
+				m.state = doneState
+				return m, m.quit
+			}
+			return m, nil
+		}
 		m.reRenderStreamingOutput()
 		m.reRenderConversation()
 		return m, nil
@@ -1729,8 +1772,6 @@ func (m *Mods) appendToOutput(s string) {
 		return
 	}
 
-	// In interactive mode, only update glamOutput for streaming display.
-	// The viewport content is managed by updateInteractiveViewport.
 	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
 		m.glamOutput = rendered
 	} else {
@@ -1747,10 +1788,7 @@ func (m *Mods) appendToOutput(s string) {
 
 	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
 	oldHeight := m.glamHeight
-	truncatedGlamOutput := m.renderer.NewStyle().
-		MaxWidth(m.width).
-		Render(m.glamOutput)
-	m.glamViewport.SetContent(truncatedGlamOutput)
+	m.glamViewport.SetContent(m.truncateToWidth(m.glamOutput))
 	if oldHeight < m.glamHeight && wasAtBottom {
 		// If the viewport's at the bottom and we've received a new
 		// line of content, follow the output by auto scrolling to

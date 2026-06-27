@@ -49,6 +49,8 @@ topk: 50
 no-limit: false
 # {{ index .Help "word-wrap" }}
 word-wrap: 80
+# {{ index .Help "render-latex" }}
+render-latex: true
 # {{ index .Help "prompt-args" }}
 include-prompt-args: false
 # {{ index .Help "prompt" }}
