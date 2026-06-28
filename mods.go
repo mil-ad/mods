@@ -58,20 +58,20 @@ const (
 // Mods is the Bubble Tea model that manages reading stdin and querying the
 // OpenAI API.
 type Mods struct {
-	Output        string
-	Input         string
-	Styles        styles
-	Error         *modsError
-	state         state
-	retries       int
-	renderer      *lipgloss.Renderer
-	glam          *glamour.TermRenderer
-	glamStyle     string // resolved glamour style ("dark"/"light"); detected once at startup
-	glamViewport  viewport.Model
-	glamOutput    string
-	glamHeight    int
-	messages      []proto.Message
-	cancelRequest []context.CancelFunc
+	Output          string
+	Input           string
+	Styles          styles
+	Error           *modsError
+	state           state
+	retries         int
+	renderer        *lipgloss.Renderer
+	glam            *glamour.TermRenderer
+	glamStyle       string // resolved glamour style ("dark"/"light"); detected once at startup
+	glamViewport    viewport.Model
+	glamOutput      string
+	glamHeight      int
+	messages        []proto.Message
+	cancelRequest   []context.CancelFunc
 	anim            tea.Model
 	responseSpinner spinner.Model
 	width           int
@@ -87,16 +87,16 @@ type Mods struct {
 	ctx context.Context
 
 	// Interactive mode fields
-	textarea            textarea.Model
-	interactive         bool
-	browseMode          bool
-	conversationContent string
-	messageOffsets      []int
-	rawMessages         []string
-	messageRoles        []string
-	currentMsgIdx       int
-	yankFlashIdx        int  // index of the message being flash-highlighted (-1 = none)
-	browsePendingG      bool // true after pressing 'g' in browse mode, waiting for second key
+	textarea             textarea.Model
+	interactive          bool
+	browseMode           bool
+	conversationContent  string
+	messageOffsets       []int
+	rawMessages          []string
+	messageRoles         []string
+	currentMsgIdx        int
+	yankFlashIdx         int    // index of the message being flash-highlighted (-1 = none)
+	browsePendingG       bool   // true after pressing 'g' in browse mode, waiting for second key
 	cachedTextareaHeight int    // cached result of interactiveTextareaHeight(); updated by syncTextareaHeight()
 	cachedVLC            int    // cached textareaVisualLineCount result
 	cachedVLCWidth       int    // textarea width used for cachedVLC
@@ -111,6 +111,14 @@ type Mods struct {
 	// Large multi-line pastes are collapsed to a marker in the textarea and
 	// expanded back to their full text on submit.
 	pastes map[string]string
+
+	// math renders LaTeX block math as kitty images. nil when disabled or the
+	// terminal lacks graphics support.
+	math *mathRenderer
+	// streamDone marks that a non-interactive response has finished streaming and
+	// the program is only waiting for outstanding LaTeX image fetches before it
+	// quits and prints the final output.
+	streamDone bool
 }
 
 // resolveGlamourStyle determines the glamour style name once. It respects the
@@ -178,6 +186,13 @@ func newMods(
 		}
 		m.syncTextareaHeight()
 	}
+	// Render LaTeX block math as images when enabled and the terminal supports
+	// the kitty graphics protocol — in interactive mode, or when streaming to a
+	// (non-raw) TTY.
+	if cfg.RenderLatex && isKittyTerminal() &&
+		(cfg.Interactive || (isOutputTTY() && !cfg.Raw)) {
+		m.math = newMathRenderer(ctx)
+	}
 	return m
 }
 
@@ -191,6 +206,25 @@ func (m *Mods) updateGlamRenderer(width int) {
 	m.glam = gr
 }
 
+// truncateToWidth clips each line of s to the terminal width, but leaves lines
+// containing a kitty image placeholder untouched: their cell counts encode the
+// image geometry and must not be altered by (necessarily imperfect) width
+// measurement of the placeholder rune and its combining diacritics.
+func (m *Mods) truncateToWidth(s string) string {
+	if m.width <= 0 {
+		return s
+	}
+	style := m.renderer.NewStyle().MaxWidth(m.width)
+	lines := strings.Split(s, "\n")
+	for i, line := range lines {
+		if strings.ContainsRune(line, placeholderRune) {
+			continue
+		}
+		lines[i] = style.Render(line)
+	}
+	return strings.Join(lines, "\n")
+}
+
 // reRenderOutput re-renders the current output with the current glamour settings.
 func (m *Mods) reRenderOutput() {
 	if !isOutputTTY() || m.Config.Raw || m.Output == "" {
@@ -198,15 +232,16 @@ func (m *Mods) reRenderOutput() {
 	}
 
 	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
-	m.glamOutput, _ = m.glam.Render(m.Output)
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+		m.glamOutput = rendered
+	} else {
+		m.glamOutput = m.Output
+	}
 	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
 	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
 	m.glamHeight = lipgloss.Height(m.glamOutput)
 	m.glamOutput += "\n"
-	truncatedGlamOutput := m.renderer.NewStyle().
-		MaxWidth(m.width).
-		Render(m.glamOutput)
-	m.glamViewport.SetContent(truncatedGlamOutput)
+	m.glamViewport.SetContent(m.truncateToWidth(m.glamOutput))
 	if wasAtBottom {
 		m.glamViewport.GotoBottom()
 	}
@@ -214,6 +249,10 @@ func (m *Mods) reRenderOutput() {
 
 // clearYankFlashMsg signals that the yank flash highlight should be cleared.
 type clearYankFlashMsg struct{}
+
+// mathReadyMsg signals that a background LaTeX render completed and the view
+// should be refreshed to show the newly-available image.
+type mathReadyMsg struct{}
 
 // completionInput is a tea.Msg that wraps the content read from stdin.
 type completionInput struct {
@@ -354,6 +393,13 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				cmds = append(cmds, m.textarea.Focus())
 				return m, tea.Batch(cmds...)
 			}
+			// Non-interactive: if an image from the final chunk is still being
+			// fetched, wait for it (a mathReadyMsg will quit once it lands) so the
+			// printed output isn't missing an equation.
+			m.streamDone = true
+			if m.math != nil && m.math.pending() {
+				return m, tea.Batch(cmds...)
+			}
 			m.state = doneState
 			return m, m.quit
 		}
@@ -377,6 +423,22 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.quit
 	case clearYankFlashMsg:
 		m.yankFlashIdx = -1
+		m.reRenderConversation()
+		return m, nil
+	case mathReadyMsg:
+		// A background formula render finished; re-render so the now-cached
+		// image is transmitted and its placeholder grid appears.
+		if !m.interactive {
+			m.reRenderOutput()
+			// If the stream is over and all images are in, quit and let the
+			// final output (with images) print.
+			if m.streamDone && (m.math == nil || !m.math.pending()) {
+				m.state = doneState
+				return m, m.quit
+			}
+			return m, nil
+		}
+		m.reRenderStreamingOutput()
 		m.reRenderConversation()
 		return m, nil
 	case tea.WindowSizeMsg:
@@ -804,7 +866,7 @@ func (m *Mods) renderHistoryList() string {
 	var sb strings.Builder
 
 	w := m.width - 2 //nolint:mnd // account for padding
-	if w < 20 {       //nolint:mnd
+	if w < 20 {      //nolint:mnd
 		w = 20
 	}
 	innerW := w - 2 //nolint:mnd // padding inside HistoryItem/HistorySelected
@@ -1218,15 +1280,12 @@ func (m *Mods) appendResponseToConversation() {
 	m.messageOffsets = append(m.messageOffsets, strings.Count(m.conversationContent, "\n"))
 	m.rawMessages = append(m.rawMessages, m.Output)
 	m.messageRoles = append(m.messageRoles, proto.RoleAssistant)
-	if m.glam != nil {
-		glamRendered, err := m.glam.Render(m.Output)
-		if err == nil {
-			glamRendered = strings.TrimFunc(glamRendered, unicode.IsSpace)
-			glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
-			m.conversationContent += glamRendered + "\n\n"
-			m.updateInteractiveViewport()
-			return
-		}
+	if glamRendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+		glamRendered = strings.TrimFunc(glamRendered, unicode.IsSpace)
+		glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
+		m.conversationContent += glamRendered + "\n\n"
+		m.updateInteractiveViewport()
+		return
 	}
 	m.conversationContent += m.Output + "\n\n"
 	m.updateInteractiveViewport()
@@ -1253,7 +1312,11 @@ func (m *Mods) reRenderStreamingOutput() {
 	if m.Output == "" {
 		return
 	}
-	m.glamOutput, _ = m.glam.Render(m.Output)
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+		m.glamOutput = rendered
+	} else {
+		m.glamOutput = m.Output
+	}
 	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
 	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
 	m.glamHeight = lipgloss.Height(m.glamOutput)
@@ -1263,7 +1326,7 @@ func (m *Mods) reRenderStreamingOutput() {
 // reRenderConversation re-renders the entire conversation after a terminal resize or highlight change.
 func (m *Mods) reRenderConversation() {
 	content, offsets, rawMessages, roles := renderConversation(
-		m.messages, m.glam,
+		m.messages, m.glam, m.math,
 		m.Styles.UserMessage, m.Styles.UserMessageFocused,
 		m.Styles.AssistantMessageFocused,
 		m.width, m.currentMsgIdx, m.yankFlashIdx,
@@ -1274,7 +1337,6 @@ func (m *Mods) reRenderConversation() {
 	m.messageRoles = roles
 	m.updateInteractiveViewport()
 }
-
 
 // loadConversationHistory loads and renders existing conversation from cache.
 func (m *Mods) loadConversationHistory() {
@@ -1287,7 +1349,7 @@ func (m *Mods) loadConversationHistory() {
 	}
 	m.messages = messages
 	content, offsets, rawMessages, roles := renderConversation(
-		messages, m.glam,
+		messages, m.glam, m.math,
 		m.Styles.UserMessage, m.Styles.UserMessageFocused,
 		m.Styles.AssistantMessageFocused,
 		m.width, -1, -1,
@@ -1710,9 +1772,11 @@ func (m *Mods) appendToOutput(s string) {
 		return
 	}
 
-	// In interactive mode, only update glamOutput for streaming display.
-	// The viewport content is managed by updateInteractiveViewport.
-	m.glamOutput, _ = m.glam.Render(m.Output)
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+		m.glamOutput = rendered
+	} else {
+		m.glamOutput = m.Output
+	}
 	m.glamOutput = strings.TrimRightFunc(m.glamOutput, unicode.IsSpace)
 	m.glamOutput = strings.ReplaceAll(m.glamOutput, "\t", strings.Repeat(" ", tabWidth))
 	m.glamHeight = lipgloss.Height(m.glamOutput)
@@ -1724,10 +1788,7 @@ func (m *Mods) appendToOutput(s string) {
 
 	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
 	oldHeight := m.glamHeight
-	truncatedGlamOutput := m.renderer.NewStyle().
-		MaxWidth(m.width).
-		Render(m.glamOutput)
-	m.glamViewport.SetContent(truncatedGlamOutput)
+	m.glamViewport.SetContent(m.truncateToWidth(m.glamOutput))
 	if oldHeight < m.glamHeight && wasAtBottom {
 		// If the viewport's at the bottom and we've received a new
 		// line of content, follow the output by auto scrolling to

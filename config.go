@@ -50,6 +50,7 @@ var help = map[string]string{
 	"no-limit":          "Turn off the client-side limit on the size of the input into the model",
 	"word-wrap":         "Wrap formatted output at specific width (default is 80)",
 	"dynamic-width":     "Use terminal width for word wrap and re-render on resize",
+	"render-latex":      "Render LaTeX block math as images in kitty-compatible terminals",
 	"max-tokens":        "Maximum number of tokens in response",
 	"temp":              "Temperature (randomness) of results, from 0.0 to 2.0, -1.0 to disable",
 	"stop":              "Up to 4 sequences where the API will stop generating further tokens",
@@ -162,6 +163,7 @@ type Config struct {
 	MaxRetries          int        `yaml:"max-retries" env:"MAX_RETRIES"`
 	WordWrap            int        `yaml:"word-wrap" env:"WORD_WRAP"`
 	DynamicWidth        bool       `yaml:"dynamic-width" env:"DYNAMIC_WIDTH"`
+	RenderLatex         bool       `yaml:"render-latex" env:"RENDER_LATEX"`
 	Fanciness           uint       `yaml:"fanciness" env:"FANCINESS"`
 	StatusText          string     `yaml:"status-text" env:"STATUS_TEXT"`
 	HTTPProxy           string     `yaml:"http-proxy" env:"HTTP_PROXY"`
@@ -212,6 +214,10 @@ type MCPServerConfig struct {
 
 func ensureConfig() (Config, error) {
 	var c Config
+	// Defaults that should apply when their key is absent from an existing
+	// config file. A bool can't tell "absent" from "false" after unmarshal, so
+	// seed it before reading the file; yaml/env can still set it false.
+	c.RenderLatex = true
 	sp, err := xdg.ConfigFile(filepath.Join("mods", "mods.yml"))
 	if err != nil {
 		return c, modsError{err, "Could not find settings path."}
@@ -294,7 +300,8 @@ func defaultConfig() Config {
 			"markdown": defaultMarkdownFormatText,
 			"json":     defaultJSONFormatText,
 		},
-		MCPTimeout: 15 * time.Second,
+		MCPTimeout:  15 * time.Second,
+		RenderLatex: true,
 	}
 }
 

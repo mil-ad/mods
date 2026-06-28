@@ -158,6 +158,11 @@ var (
 			}
 			mods := newMods(cmd.Context(), stderrRenderer(), &config, db, cache)
 			p := tea.NewProgram(mods, opts...)
+			// Let background LaTeX renders nudge the program to re-render once
+			// their images are ready.
+			if mods.math != nil {
+				mods.math.notify = func() { p.Send(mathReadyMsg{}) }
+			}
 			m, err := p.Run()
 			if err != nil {
 				return modsError{err, "Couldn't start Bubble Tea program."}
@@ -311,6 +316,7 @@ func initFlags() {
 	flags.Int64Var(&config.MaxTokens, "max-tokens", config.MaxTokens, stdoutStyles().FlagDesc.Render(help["max-tokens"]))
 	flags.IntVar(&config.WordWrap, "word-wrap", config.WordWrap, stdoutStyles().FlagDesc.Render(help["word-wrap"]))
 	flags.BoolVar(&config.DynamicWidth, "dynamic-width", config.DynamicWidth, stdoutStyles().FlagDesc.Render(help["dynamic-width"]))
+	flags.BoolVar(&config.RenderLatex, "render-latex", config.RenderLatex, stdoutStyles().FlagDesc.Render(help["render-latex"]))
 	flags.Float64Var(&config.Temperature, "temp", config.Temperature, stdoutStyles().FlagDesc.Render(help["temp"]))
 	flags.StringArrayVar(&config.Stop, "stop", config.Stop, stdoutStyles().FlagDesc.Render(help["stop"]))
 	flags.Float64Var(&config.TopP, "topp", config.TopP, stdoutStyles().FlagDesc.Render(help["topp"]))
