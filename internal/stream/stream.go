@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/mil-ad/mods/internal/proto"
 )
 
 // ErrNoContent happens when the client is returning no content.

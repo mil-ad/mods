@@ -4,7 +4,7 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/mil-ad/mods/internal/proto"
 )
 
 func (m *Mods) setupStreamContext(content string, mod Model) error {

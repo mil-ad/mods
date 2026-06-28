@@ -9,7 +9,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/glamour"
 	"github.com/charmbracelet/lipgloss"
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/mil-ad/mods/internal/proto"
 )
 
 // textareaSubmitMsg is sent when the user submits text from the textarea.

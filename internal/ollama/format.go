@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"strconv"
 
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/mil-ad/mods/internal/proto"
 	"github.com/mark3labs/mcp-go/mcp"
 	"github.com/ollama/ollama/api"
 )

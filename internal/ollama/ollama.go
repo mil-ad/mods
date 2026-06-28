@@ -7,8 +7,8 @@ import (
 	"net/url"
 	"strconv"
 
-	"github.com/charmbracelet/mods/internal/proto"
-	"github.com/charmbracelet/mods/internal/stream"
+	"github.com/mil-ad/mods/internal/proto"
+	"github.com/mil-ad/mods/internal/stream"
 	"github.com/ollama/ollama/api"
 )
 

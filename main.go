@@ -18,7 +18,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	glamour "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/huh"
-	"github.com/charmbracelet/mods/internal/cache"
+	"github.com/mil-ad/mods/internal/cache"
 	"github.com/charmbracelet/x/editor"
 	mcobra "github.com/muesli/mango-cobra"
 	"github.com/muesli/roff"

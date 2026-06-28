@@ -1,7 +1,7 @@
 package cohere
 
 import (
-	"github.com/charmbracelet/mods/internal/proto"
+	"github.com/mil-ad/mods/internal/proto"
 	cohere "github.com/cohere-ai/cohere-go/v2"
 )
 
