@@ -125,18 +125,3 @@ func placeholderGrid(id, cols, rows int, diac []rune) string {
 	}
 	return sb.String()
 }
-
-// placeholderRow builds a single row (no trailing newline) of cols placeholder
-// cells, for displaying a one-cell-tall image inline with surrounding text.
-func placeholderRow(id, cols int, diac []rune) string {
-	r, g, b := byte((id>>16)&0xff), byte((id>>8)&0xff), byte(id&0xff)
-	var sb strings.Builder
-	fmt.Fprintf(&sb, "\x1b[38;2;%d;%d;%dm", r, g, b)
-	for col := range cols {
-		sb.WriteRune(placeholderRune)
-		sb.WriteRune(diac[0])
-		sb.WriteRune(diac[col])
-	}
-	sb.WriteString("\x1b[39m")
-	return sb.String()
-}

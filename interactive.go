@@ -54,34 +54,28 @@ func renderUserMessage(content string, style lipgloss.Style, width int) string {
 }
 
 // renderAssistantMarkdown renders an assistant message to ANSI via glamour,
-// swapping block- and inline-math spans for kitty placeholder grids when math is
-// non-nil. Returns the rendered string and whether rendering succeeded (false
-// falls back to plain text at the call site). Callers apply their own whitespace
-// trimming.
-//
-// glamour has no math support and no extension hook, so math is replaced before
-// it runs (block → line sentinels, inline → width-matched filler runs) and the
-// placeholders are swapped for images afterwards.
+// swapping block-math spans for kitty placeholder grids when math is non-nil.
+// Returns the rendered string and whether rendering succeeded (false falls back
+// to plain text at the call site). Callers apply their own whitespace trimming.
 func renderAssistantMarkdown(glam *glamour.TermRenderer, math *mathRenderer, content string) (string, bool) {
 	if glam == nil {
 		return "", false
 	}
 	renderContent := content
-	var blockGrids map[int]string
-	var inlineReps []inlineRep
+	var grids map[int]string
 	if math != nil {
-		var blockFormulas []string
-		renderContent, blockFormulas = extractBlockMath(renderContent)
-		blockGrids = math.render(blockFormulas)
-		renderContent, inlineReps = math.prepareInline(renderContent)
+		// Extract block math to sentinels before glamour (which has no math
+		// support), then swap in placeholder grids after.
+		processed, formulas := extractBlockMath(content)
+		renderContent = processed
+		grids = math.render(formulas)
 	}
 	rendered, err := glam.Render(renderContent)
 	if err != nil {
 		return "", false
 	}
 	if math != nil {
-		rendered = substituteMath(rendered, blockGrids)
-		rendered = substituteInline(rendered, inlineReps)
+		rendered = substituteMath(rendered, grids)
 	}
 	return rendered, true
 }
