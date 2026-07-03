@@ -37,13 +37,9 @@ func (c *Client) Request(ctx context.Context, request proto.Request) stream.Stre
 		body.MaxTokens = 4096
 	}
 
-	if request.Temperature != nil {
-		body.Temperature = anthropic.Float(*request.Temperature)
-	}
-
-	if request.TopP != nil {
-		body.TopP = anthropic.Float(*request.TopP)
-	}
+	// Temperature, TopP, and TopK are not sent to Anthropic: they were removed
+	// from the Messages API for current-generation models (Opus 4.7 / Sonnet 5 /
+	// Fable 5 and later) and return a 400 error.
 
 	s := &Stream{
 		stream:   c.Messages.NewStreaming(ctx, body),
