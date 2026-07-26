@@ -18,8 +18,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	glamour "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/huh"
-	"github.com/mil-ad/mods/internal/cache"
 	"github.com/charmbracelet/x/editor"
+	"github.com/mil-ad/mods/internal/cache"
 	mcobra "github.com/muesli/mango-cobra"
 	"github.com/muesli/roff"
 	"github.com/muesli/termenv"
@@ -814,7 +814,7 @@ func saveConversation(mods *Mods) error {
 	if err := cache.Write(id, &mods.messages); err != nil {
 		return modsError{err, errReason}
 	}
-	if err := db.Save(id, title, config.API, config.Model); err != nil {
+	if err := db.Save(id, title, config.API, config.Model, turnCount(mods.messages)); err != nil {
 		_ = cache.Delete(id) // remove leftovers
 		return modsError{err, errReason}
 	}
