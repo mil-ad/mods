@@ -80,6 +80,14 @@ var (
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config.Prefix = removeWhitespace(strings.Join(args, " "))
 
+			if len(config.AttachmentRefs) > 0 {
+				attachments, err := resolveAttachments(config.AttachmentRefs)
+				if err != nil {
+					return modsError{err, "Could not read attachment."}
+				}
+				config.Attachments = attachments
+			}
+
 			// Interactive mode forces dynamic width and disables raw
 			if config.Interactive {
 				config.DynamicWidth = true
@@ -300,6 +308,7 @@ func initFlags() {
 	flags.BoolVarP(&config.Raw, "raw", "r", config.Raw, stdoutStyles().FlagDesc.Render(help["raw"]))
 	flags.IntVarP(&config.IncludePrompt, "prompt", "P", config.IncludePrompt, stdoutStyles().FlagDesc.Render(help["prompt"]))
 	flags.BoolVarP(&config.IncludePromptArgs, "prompt-args", "p", config.IncludePromptArgs, stdoutStyles().FlagDesc.Render(help["prompt-args"]))
+	flags.StringArrayVarP(&config.AttachmentRefs, "attachment", "A", config.AttachmentRefs, stdoutStyles().FlagDesc.Render(help["attachment"]))
 	flags.StringVarP(&config.Continue, "continue", "c", "", stdoutStyles().FlagDesc.Render(help["continue"]))
 	flags.BoolVarP(&config.ContinueLast, "continue-last", "C", false, stdoutStyles().FlagDesc.Render(help["continue-last"]))
 	flags.BoolVarP(&config.List, "list", "l", config.List, stdoutStyles().FlagDesc.Render(help["list"]))

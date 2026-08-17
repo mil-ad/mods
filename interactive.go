@@ -14,7 +14,8 @@ import (
 
 // textareaSubmitMsg is sent when the user submits text from the textarea.
 type textareaSubmitMsg struct {
-	content string
+	content     string
+	attachments []proto.Attachment
 }
 
 // newInteractiveTextarea creates and configures the textarea for interactive mode.

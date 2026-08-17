@@ -117,30 +117,5 @@ func (m *Mods) setCursorToOffset(off int) {
 // a single unit and forgets its stored text. Returns false (not consumed) when
 // the cursor isn't right after a marker, so normal deletion can proceed.
 func (m *Mods) deletePasteMarkerBackward() bool {
-	if len(m.pastes) == 0 {
-		return false
-	}
-	val := []rune(m.textarea.Value())
-	off := m.cursorOffset()
-	before := string(val[:off])
-
-	// Pick the longest matching marker in case one marker is a suffix of
-	// another (e.g. the " (k)" disambiguated variants).
-	match := ""
-	for marker := range m.pastes {
-		if strings.HasSuffix(before, marker) && len(marker) > len(match) {
-			match = marker
-		}
-	}
-	if match == "" {
-		return false
-	}
-
-	start := off - len([]rune(match))
-	newVal := string(val[:start]) + string(val[off:])
-	delete(m.pastes, match)
-	m.textarea.SetValue(newVal)
-	m.setCursorToOffset(start)
-	m.syncTextareaHeight()
-	return true
+	return deleteMarkerBackward(m, m.pastes)
 }

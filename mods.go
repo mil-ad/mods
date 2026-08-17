@@ -112,6 +112,12 @@ type Mods struct {
 	// expanded back to their full text on submit.
 	pastes map[string]string
 
+	// Attachment placeholder fields: marker string (e.g. "[Image #1]") ->
+	// attached image. Unlike paste markers, these are never stripped from the
+	// submitted text (see collectAttachments). Numbering is derived from the
+	// textarea content itself (see registerAttachment), not a stored counter.
+	attachments map[string]proto.Attachment
+
 	// math renders LaTeX block math as kitty images. nil when disabled or the
 	// terminal lacks graphics support.
 	math *mathRenderer
@@ -357,11 +363,12 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.startCompletionCmd(msg.content))
 
 	case textareaSubmitMsg:
-		if strings.TrimSpace(msg.content) == "" {
+		if strings.TrimSpace(msg.content) == "" && len(msg.attachments) == 0 {
 			return m, nil
 		}
 		m.textarea.Reset()
 		m.clearPastes()
+		m.clearAttachments()
 		m.syncTextareaHeight()
 		m.browseMode = false
 
@@ -370,6 +377,7 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Set up for the next request: use the textarea content as the input
 		m.Config.Prefix = msg.content
+		m.Config.Attachments = msg.attachments
 		m.Input = msg.content
 		m.Output = ""
 		m.state = requestState
@@ -524,8 +532,13 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleBrowseModeKey(msg)
 		}
 		// Bracketed paste arrives as a single KeyMsg with Paste set. Route it
-		// through insertPaste so large multi-line pastes get collapsed.
+		// through insertPaste so large multi-line pastes get collapsed — but
+		// first check for a drag-and-dropped image, which terminals deliver as
+		// a paste of the file's path.
 		if msg.Paste {
+			if m.insertDroppedImage(string(msg.Runes)) {
+				return m, nil
+			}
 			m.insertPaste(string(msg.Runes))
 			return m, nil
 		}
@@ -559,6 +572,9 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Paste from clipboard directly so we can sync textarea height
 			// after insertion. The textarea's built-in Paste is async and
 			// the height sync gets lost.
+			if m.insertClipboardImage() {
+				return m, nil
+			}
 			if str, err := clipboard.ReadAll(); err == nil && str != "" {
 				m.insertPaste(str)
 			}
@@ -571,16 +587,18 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			content := m.expandPastes(m.textarea.Value())
-			if strings.TrimSpace(content) == "" {
+			attachments := m.collectAttachments(content)
+			if strings.TrimSpace(content) == "" && len(attachments) == 0 {
 				return m, nil
 			}
 			return m, func() tea.Msg {
-				return textareaSubmitMsg{content: content}
+				return textareaSubmitMsg{content: content, attachments: attachments}
 			}
 		case "backspace", "ctrl+h", "ctrl+w", "alt+backspace":
-			// Delete a collapsed paste marker as a single unit when the cursor
-			// sits right after one; otherwise fall through to normal deletion.
-			if m.deletePasteMarkerBackward() {
+			// Delete a collapsed paste/attachment marker as a single unit when
+			// the cursor sits right after one; otherwise fall through to
+			// normal deletion.
+			if m.deletePasteMarkerBackward() || m.deleteAttachmentMarkerBackward() {
 				return m, nil
 			}
 		}
@@ -1457,6 +1475,13 @@ func (m *Mods) startCompletionCmd(content string) tea.Cmd {
 					"The API endpoint %s is not configured.",
 					m.Styles.InlineCode.Render(cfg.API),
 				),
+			}
+		}
+
+		if len(cfg.Attachments) > 0 && !apiSupportsAttachments(mod.API) {
+			return modsError{
+				err:    fmt.Errorf("attachments are not supported for the %q API", mod.API),
+				reason: "This model/provider doesn't support image attachments yet.",
 			}
 		}
 

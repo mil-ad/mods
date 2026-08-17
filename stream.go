@@ -62,9 +62,22 @@ func (m *Mods) setupStreamContext(content string, mod Model) error {
 	}
 
 	m.messages = append(m.messages, proto.Message{
-		Role:    proto.RoleUser,
-		Content: content,
+		Role:        proto.RoleUser,
+		Content:     content,
+		Attachments: cfg.Attachments,
 	})
 
 	return nil
+}
+
+// apiSupportsAttachments reports whether the given API can accept image
+// attachments. Gated at the provider level rather than per-model: simpler,
+// and avoids maintaining a model capability list.
+func apiSupportsAttachments(api string) bool {
+	switch api {
+	case "google", "cohere", "ollama":
+		return false
+	default: // openai (default case), azure, azure-ad, anthropic
+		return true
+	}
 }

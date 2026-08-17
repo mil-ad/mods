@@ -44,9 +44,17 @@ func (c ToolCallStatus) String() string {
 
 // Message is a message in the conversation.
 type Message struct {
-	Role      string
-	Content   string
-	ToolCalls []ToolCall
+	Role        string
+	Content     string
+	ToolCalls   []ToolCall
+	Attachments []Attachment
+}
+
+// Attachment is a file (currently: image) attached to a user message.
+type Attachment struct {
+	MediaType string // e.g. "image/png"
+	Data      []byte // raw bytes; empty when URL is set
+	URL       string // remote URL; when set, providers reference it directly instead of embedding Data
 }
 
 // ToolCall is a tool call in a message.
