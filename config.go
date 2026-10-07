@@ -14,6 +14,7 @@ import (
 	"github.com/caarlos0/duration"
 	"github.com/caarlos0/env/v9"
 	"github.com/charmbracelet/x/exp/strings"
+	"github.com/mil-ad/mods/internal/proto"
 	"github.com/muesli/termenv"
 	"github.com/spf13/cobra"
 	flag "github.com/spf13/pflag"
@@ -42,6 +43,7 @@ var help = map[string]string{
 	"list-roles":        "List the roles defined in your configuration file",
 	"prompt":            "Include the prompt from the arguments and stdin, truncate stdin to specified number of lines",
 	"prompt-args":       "Include the prompt from the arguments in the response",
+	"attachment":        "Attach a local image file or URL to the prompt (repeatable); only supported by vision-capable models",
 	"raw":               "Render output as raw text when connected to a TTY",
 	"quiet":             "Quiet mode (hide the spinner while loading and stderr messages for success)",
 	"help":              "Show help and exit",
@@ -175,6 +177,8 @@ type Config struct {
 	ShowHelp            bool
 	ResetSettings       bool
 	Prefix              string
+	AttachmentRefs      []string           // unresolved --attachment values: file paths or URLs
+	Attachments         []proto.Attachment // AttachmentRefs once read/validated; see RunE in main.go
 	Version             bool
 	Settings            bool
 	Dirs                bool

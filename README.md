@@ -166,6 +166,7 @@ Check the [`./features.md`](./features.md) for more details.
 - `--format-as`: Specify the format for the output (used with `--format`)
 - `-P`, `--prompt` Include the prompt from the arguments and stdin, truncate stdin to specified number of lines
 - `-p`, `--prompt-args`: Include the prompt from the arguments in the response
+- `-A`, `--attachment`: Attach an image (file path or URL) to the prompt; repeat for several. Needs a vision-capable model
 - `-q`, `--quiet`: Only output errors to standard err
 - `-r`, `--raw`: Print raw response without syntax highlighting
 - `--settings`: Open settings

@@ -1,6 +1,7 @@
 package anthropic
 
 import (
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 
@@ -41,8 +42,11 @@ func fromProtoMessages(input []proto.Message) (system []anthropic.TextBlockParam
 				break
 			}
 		case proto.RoleUser:
-			block := anthropic.NewTextBlock(msg.Content)
-			messages = append(messages, anthropic.NewUserMessage(block))
+			blocks := []anthropic.ContentBlockParamUnion{anthropic.NewTextBlock(msg.Content)}
+			for _, att := range msg.Attachments {
+				blocks = append(blocks, attachmentBlock(att))
+			}
+			messages = append(messages, anthropic.NewUserMessage(blocks...))
 		case proto.RoleAssistant:
 			blocks := []anthropic.ContentBlockParamUnion{
 				anthropic.NewTextBlock(msg.Content),
@@ -61,6 +65,16 @@ func fromProtoMessages(input []proto.Message) (system []anthropic.TextBlockParam
 		}
 	}
 	return system, messages
+}
+
+// attachmentBlock builds an image content block, referencing the attachment's
+// URL directly when set (no client-side fetch needed) or base64-encoding its
+// raw bytes otherwise.
+func attachmentBlock(att proto.Attachment) anthropic.ContentBlockParamUnion {
+	if att.URL != "" {
+		return anthropic.NewImageBlock(anthropic.URLImageSourceParam{URL: att.URL})
+	}
+	return anthropic.NewImageBlockBase64(att.MediaType, base64.StdEncoding.EncodeToString(att.Data))
 }
 
 func toProtoMessage(in anthropic.MessageParam) proto.Message {
