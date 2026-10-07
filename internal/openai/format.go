@@ -1,6 +1,7 @@
 package openai
 
 import (
+	"encoding/base64"
 	"fmt"
 
 	"github.com/mil-ad/mods/internal/proto"
@@ -46,7 +47,17 @@ func fromProtoMessages(input []proto.Message) []openai.ChatCompletionMessagePara
 				break
 			}
 		case proto.RoleUser:
-			messages = append(messages, openai.UserMessage(msg.Content))
+			if len(msg.Attachments) == 0 {
+				messages = append(messages, openai.UserMessage(msg.Content))
+				break
+			}
+			parts := []openai.ChatCompletionContentPartUnionParam{openai.TextContentPart(msg.Content)}
+			for _, att := range msg.Attachments {
+				parts = append(parts, openai.ImageContentPart(openai.ChatCompletionContentPartImageImageURLParam{
+					URL: attachmentURL(att),
+				}))
+			}
+			messages = append(messages, openai.UserMessage(parts))
 		case proto.RoleAssistant:
 			m := openai.AssistantMessage(msg.Content)
 			for _, tool := range msg.ToolCalls {
@@ -94,6 +105,15 @@ func toProtoMessage(in openai.ChatCompletionMessageParamUnion) proto.Message {
 		}
 	}
 	return msg
+}
+
+// attachmentURL returns the value to use for a content part's image_url.url
+// field, which OpenAI accepts as either a real URL or a data: URI.
+func attachmentURL(att proto.Attachment) string {
+	if att.URL != "" {
+		return att.URL
+	}
+	return fmt.Sprintf("data:%s;base64,%s", att.MediaType, base64.StdEncoding.EncodeToString(att.Data))
 }
 
 func msgRole(in openai.ChatCompletionMessageParamUnion) string {

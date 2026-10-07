@@ -112,6 +112,12 @@ type Mods struct {
 	// expanded back to their full text on submit.
 	pastes map[string]string
 
+	// Attachment placeholder fields: marker string (e.g. "[Image #1]") ->
+	// attached image. Unlike paste markers, these are never stripped from the
+	// submitted text (see collectAttachments). Numbering is derived from the
+	// textarea content itself (see registerAttachment), not a stored counter.
+	attachments map[string]proto.Attachment
+
 	// math renders LaTeX block math as kitty images. nil when disabled or the
 	// terminal lacks graphics support.
 	math *mathRenderer
@@ -357,11 +363,12 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		cmds = append(cmds, m.startCompletionCmd(msg.content))
 
 	case textareaSubmitMsg:
-		if strings.TrimSpace(msg.content) == "" {
+		if strings.TrimSpace(msg.content) == "" && len(msg.attachments) == 0 {
 			return m, nil
 		}
 		m.textarea.Reset()
 		m.clearPastes()
+		m.clearAttachments()
 		m.syncTextareaHeight()
 		m.browseMode = false
 
@@ -370,6 +377,7 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 		// Set up for the next request: use the textarea content as the input
 		m.Config.Prefix = msg.content
+		m.Config.Attachments = msg.attachments
 		m.Input = msg.content
 		m.Output = ""
 		m.state = requestState
@@ -524,17 +532,29 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m.handleBrowseModeKey(msg)
 		}
 		// Bracketed paste arrives as a single KeyMsg with Paste set. Route it
-		// through insertPaste so large multi-line pastes get collapsed.
+		// through insertPaste so large multi-line pastes get collapsed — but
+		// first check for a drag-and-dropped image, which terminals deliver as
+		// a paste of the file's path.
 		if msg.Paste {
+			if m.insertDroppedImage(string(msg.Runes)) {
+				return m, nil
+			}
 			m.insertPaste(string(msg.Runes))
 			return m, nil
 		}
 		switch msg.String() {
-		case "ctrl+c", "ctrl+d":
+		case "ctrl+c":
 			m.state = doneState
 			return m, m.quit
 		case "ctrl+r":
 			return m.enterHistoryMode()
+		case "pgup", "pgdown", "ctrl+u", "ctrl+d":
+			// Scroll the conversation like browse mode does, instead of the
+			// textarea's own bindings for these keys (ctrl+u clears input,
+			// ctrl+d used to quit like shell EOF; pgup/pgdown were no-ops).
+			var cmd tea.Cmd
+			m.glamViewport, cmd = m.glamViewport.Update(msg)
+			return m, cmd
 		case "esc":
 			// No conversation yet: quit the app
 			if len(m.messageOffsets) == 0 {
@@ -552,6 +572,9 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// Paste from clipboard directly so we can sync textarea height
 			// after insertion. The textarea's built-in Paste is async and
 			// the height sync gets lost.
+			if m.insertClipboardImage() {
+				return m, nil
+			}
 			if str, err := clipboard.ReadAll(); err == nil && str != "" {
 				m.insertPaste(str)
 			}
@@ -564,16 +587,18 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return m, nil
 		case "enter":
 			content := m.expandPastes(m.textarea.Value())
-			if strings.TrimSpace(content) == "" {
+			attachments := m.collectAttachments(content)
+			if strings.TrimSpace(content) == "" && len(attachments) == 0 {
 				return m, nil
 			}
 			return m, func() tea.Msg {
-				return textareaSubmitMsg{content: content}
+				return textareaSubmitMsg{content: content, attachments: attachments}
 			}
 		case "backspace", "ctrl+h", "ctrl+w", "alt+backspace":
-			// Delete a collapsed paste marker as a single unit when the cursor
-			// sits right after one; otherwise fall through to normal deletion.
-			if m.deletePasteMarkerBackward() {
+			// Delete a collapsed paste/attachment marker as a single unit when
+			// the cursor sits right after one; otherwise fall through to
+			// normal deletion.
+			if m.deletePasteMarkerBackward() || m.deleteAttachmentMarkerBackward() {
 				return m, nil
 			}
 		}
@@ -873,6 +898,8 @@ func (m *Mods) renderHistoryList() string {
 
 	// Fixed-width timestamp column covers all timeago values (e.g. "12 months ago").
 	const timeCol = 16
+	// Fixed-width turns column covers up to 4-digit turn counts (e.g. "9999 turns").
+	const turnsCol = 11
 
 	// "New conversation" entry
 	label := "+ New conversation"
@@ -892,6 +919,16 @@ func (m *Mods) renderHistoryList() string {
 			timea = rw.Truncate(timea, timeCol, "")
 		}
 
+		turns := fmt.Sprintf("%d turn", c.TurnCount)
+		if c.TurnCount != 1 {
+			turns += "s"
+		}
+		if rw.StringWidth(turns) < turnsCol {
+			turns += strings.Repeat(" ", turnsCol-rw.StringWidth(turns))
+		} else {
+			turns = rw.Truncate(turns, turnsCol, "")
+		}
+
 		model := ""
 		if c.Model != nil {
 			model = strings.TrimSpace(*c.Model)
@@ -902,10 +939,10 @@ func (m *Mods) renderHistoryList() string {
 		title := strings.TrimSpace(c.Title)
 		title = strings.ReplaceAll(title, "\t", " ")
 
-		// Budget: afterTime = space after timestamp. Title gets up to 80%
+		// Budget: afterTime = space after timestamp+turns. Title gets up to 80%
 		// of that, but is further reduced to guarantee title+gap+model fits
 		// in a single line.
-		afterTime := innerW - timeCol
+		afterTime := innerW - timeCol - turnsCol
 		titleMax := afterTime * 4 / 5 //nolint:mnd
 		if model != "" {
 			fitMax := afterTime - modelW - 2 //nolint:mnd // 2 = min gap
@@ -942,13 +979,13 @@ func (m *Mods) renderHistoryList() string {
 		}
 
 		if m.historySelectedIdx == i+1 {
-			line := timea + title
+			line := timea + turns + title
 			if model != "" {
 				line += strings.Repeat(" ", gap) + model
 			}
 			sb.WriteString(m.Styles.HistorySelected.Width(w).Render(line))
 		} else {
-			line := m.Styles.Timeago.Render(timea) + title
+			line := m.Styles.Timeago.Render(timea) + m.Styles.Timeago.Render(turns) + title
 			if model != "" {
 				line += strings.Repeat(" ", gap) + m.Styles.Comment.Render(model)
 			}
@@ -1382,7 +1419,7 @@ func (m *Mods) interactiveSave() {
 	if err := m.cache.Write(id, &m.messages); err != nil {
 		return
 	}
-	_ = m.db.Save(id, title, m.Config.API, m.Config.Model)
+	_ = m.db.Save(id, title, m.Config.API, m.Config.Model, turnCount(m.messages))
 	// Ensure subsequent turns can read from this conversation's cache
 	m.Config.cacheReadFromID = id
 }
@@ -1438,6 +1475,13 @@ func (m *Mods) startCompletionCmd(content string) tea.Cmd {
 					"The API endpoint %s is not configured.",
 					m.Styles.InlineCode.Render(cfg.API),
 				),
+			}
+		}
+
+		if len(cfg.Attachments) > 0 && !apiSupportsAttachments(mod.API) {
+			return modsError{
+				err:    fmt.Errorf("attachments are not supported for the %q API", mod.API),
+				reason: "This model/provider doesn't support image attachments yet.",
 			}
 		}
 

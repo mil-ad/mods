@@ -18,8 +18,8 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	glamour "github.com/charmbracelet/glamour/styles"
 	"github.com/charmbracelet/huh"
-	"github.com/mil-ad/mods/internal/cache"
 	"github.com/charmbracelet/x/editor"
+	"github.com/mil-ad/mods/internal/cache"
 	mcobra "github.com/muesli/mango-cobra"
 	"github.com/muesli/roff"
 	"github.com/muesli/termenv"
@@ -79,6 +79,14 @@ var (
 		Example:       randomExample(),
 		RunE: func(cmd *cobra.Command, args []string) error {
 			config.Prefix = removeWhitespace(strings.Join(args, " "))
+
+			if len(config.AttachmentRefs) > 0 {
+				attachments, err := resolveAttachments(config.AttachmentRefs)
+				if err != nil {
+					return modsError{err, "Could not read attachment."}
+				}
+				config.Attachments = attachments
+			}
 
 			// Interactive mode forces dynamic width and disables raw
 			if config.Interactive {
@@ -300,6 +308,7 @@ func initFlags() {
 	flags.BoolVarP(&config.Raw, "raw", "r", config.Raw, stdoutStyles().FlagDesc.Render(help["raw"]))
 	flags.IntVarP(&config.IncludePrompt, "prompt", "P", config.IncludePrompt, stdoutStyles().FlagDesc.Render(help["prompt"]))
 	flags.BoolVarP(&config.IncludePromptArgs, "prompt-args", "p", config.IncludePromptArgs, stdoutStyles().FlagDesc.Render(help["prompt-args"]))
+	flags.StringArrayVarP(&config.AttachmentRefs, "attachment", "A", config.AttachmentRefs, stdoutStyles().FlagDesc.Render(help["attachment"]))
 	flags.StringVarP(&config.Continue, "continue", "c", "", stdoutStyles().FlagDesc.Render(help["continue"]))
 	flags.BoolVarP(&config.ContinueLast, "continue-last", "C", false, stdoutStyles().FlagDesc.Render(help["continue-last"]))
 	flags.BoolVarP(&config.List, "list", "l", config.List, stdoutStyles().FlagDesc.Render(help["list"]))
@@ -814,7 +823,7 @@ func saveConversation(mods *Mods) error {
 	if err := cache.Write(id, &mods.messages); err != nil {
 		return modsError{err, errReason}
 	}
-	if err := db.Save(id, title, config.API, config.Model); err != nil {
+	if err := db.Save(id, title, config.API, config.Model, turnCount(mods.messages)); err != nil {
 		_ = cache.Delete(id) // remove leftovers
 		return modsError{err, errReason}
 	}

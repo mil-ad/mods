@@ -77,6 +77,14 @@ func openDB(ds string) (*convoDB, error) {
 			return nil, fmt.Errorf("could not migrate db: %w", err)
 		}
 	}
+	// TODO: remove once all instances of mods have migrated (added 2026-07-26).
+	if !hasColumn(db, "turn_count") {
+		if _, err := db.Exec(`
+			ALTER TABLE conversations ADD COLUMN turn_count integer NOT NULL DEFAULT 0
+		`); err != nil {
+			return nil, fmt.Errorf("could not migrate db: %w", err)
+		}
+	}
 
 	return &convoDB{db: db}, nil
 }
@@ -104,23 +112,25 @@ type Conversation struct {
 	UpdatedAt time.Time `db:"updated_at"`
 	API       *string   `db:"api"`
 	Model     *string   `db:"model"`
+	TurnCount int       `db:"turn_count"`
 }
 
 func (c *convoDB) Close() error {
 	return c.db.Close() //nolint: wrapcheck
 }
 
-func (c *convoDB) Save(id, title, api, model string) error {
+func (c *convoDB) Save(id, title, api, model string, turnCount int) error {
 	res, err := c.db.Exec(c.db.Rebind(`
 		UPDATE conversations
 		SET
 		  title = ?,
 		  api = ?,
 		  model = ?,
+		  turn_count = ?,
 		  updated_at = CURRENT_TIMESTAMP
 		WHERE
 		  id = ?
-	`), title, api, model, id)
+	`), title, api, model, turnCount, id)
 	if err != nil {
 		return fmt.Errorf("Save: %w", err)
 	}
@@ -136,10 +146,10 @@ func (c *convoDB) Save(id, title, api, model string) error {
 
 	if _, err := c.db.Exec(c.db.Rebind(`
 		INSERT INTO
-		  conversations (id, title, api, model)
+		  conversations (id, title, api, model, turn_count)
 		VALUES
-		  (?, ?, ?, ?)
-	`), id, title, api, model); err != nil {
+		  (?, ?, ?, ?, ?)
+	`), id, title, api, model, turnCount); err != nil {
 		return fmt.Errorf("Save: %w", err)
 	}
 
