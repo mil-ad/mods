@@ -51,6 +51,12 @@ no-limit: false
 word-wrap: 80
 # {{ index .Help "render-latex" }}
 render-latex: true
+# {{ index .Help "render-mermaid" }}
+render-mermaid: true
+# {{ index .Help "mermaid-ink-server" }}
+mermaid-ink-server: https://mermaid.ink
+# {{ index .Help "mermaid-ink-concurrency" }}
+mermaid-ink-concurrency: 2
 # {{ index .Help "prompt-args" }}
 include-prompt-args: false
 # {{ index .Help "prompt" }}

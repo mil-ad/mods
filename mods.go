@@ -118,11 +118,11 @@ type Mods struct {
 	// textarea content itself (see registerAttachment), not a stored counter.
 	attachments map[string]proto.Attachment
 
-	// math renders LaTeX block math as kitty images. nil when disabled or the
-	// terminal lacks graphics support.
-	math *mathRenderer
+	// images renders LaTeX block math and mermaid diagrams as kitty images. nil
+	// when both are disabled or the terminal lacks graphics support.
+	images *imageRenderer
 	// streamDone marks that a non-interactive response has finished streaming and
-	// the program is only waiting for outstanding LaTeX image fetches before it
+	// the program is only waiting for outstanding image fetches before it
 	// quits and prints the final output.
 	streamDone bool
 }
@@ -192,12 +192,21 @@ func newMods(
 		}
 		m.syncTextareaHeight()
 	}
-	// Render LaTeX block math as images when enabled and the terminal supports
-	// the kitty graphics protocol — in interactive mode, or when streaming to a
-	// (non-raw) TTY.
-	if cfg.RenderLatex && isKittyTerminal() &&
+	// Render LaTeX block math and mermaid diagrams as images when enabled and
+	// the terminal supports the kitty graphics protocol — in interactive mode,
+	// or when streaming to a (non-raw) TTY.
+	if (cfg.RenderLatex || cfg.RenderMermaid) && isKittyTerminal() &&
 		(cfg.Interactive || (isOutputTTY() && !cfg.Raw)) {
-		m.math = newMathRenderer(ctx)
+		m.images = newImageRenderer(ctx, imageRendererOptions{
+			math:       cfg.RenderLatex,
+			mermaid:    cfg.RenderMermaid,
+			darkTheme:  glamStyle != "light",
+			wordWrap:   wordWrap,
+			failedNote: m.Styles.ImageFailed.Render("✗ Couldn't render diagram"),
+
+			mermaidServer:      cfg.MermaidInkServer,
+			mermaidConcurrency: cfg.MermaidInkConcurrency,
+		})
 	}
 	return m
 }
@@ -210,6 +219,9 @@ func (m *Mods) updateGlamRenderer(width int) {
 		glamour.WithWordWrap(width),
 	)
 	m.glam = gr
+	if m.images != nil {
+		m.images.setWordWrap(width)
+	}
 }
 
 // truncateToWidth clips each line of s to the terminal width, but leaves lines
@@ -238,7 +250,7 @@ func (m *Mods) reRenderOutput() {
 	}
 
 	wasAtBottom := m.glamViewport.ScrollPercent() == 1.0
-	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.images, m.Output); ok {
 		m.glamOutput = rendered
 	} else {
 		m.glamOutput = m.Output
@@ -256,9 +268,9 @@ func (m *Mods) reRenderOutput() {
 // clearYankFlashMsg signals that the yank flash highlight should be cleared.
 type clearYankFlashMsg struct{}
 
-// mathReadyMsg signals that a background LaTeX render completed and the view
+// imageReadyMsg signals that a background image render completed and the view
 // should be refreshed to show the newly-available image.
-type mathReadyMsg struct{}
+type imageReadyMsg struct{}
 
 // completionInput is a tea.Msg that wraps the content read from stdin.
 type completionInput struct {
@@ -279,6 +291,19 @@ func (m *Mods) Init() tea.Cmd {
 
 // Update implements tea.Model.
 func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
+	model, cmd := m.update(msg)
+	// A diagram render may have started during this update (e.g. on the
+	// re-render after a response finished streaming). The spinner only ticks
+	// while something forwards its ticks, so (re)start its loop to keep the
+	// status badge animated until the diagrams are in. A duplicate loop is
+	// harmless: the spinner drops ticks that don't match its sequence.
+	if m.images != nil && m.images.takeStarted() {
+		cmd = tea.Batch(cmd, m.responseSpinner.Tick)
+	}
+	return model, cmd
+}
+
+func (m *Mods) update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	var cmds []tea.Cmd
 	switch msg := msg.(type) {
 	case cacheDetailsMsg:
@@ -402,10 +427,10 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				return m, tea.Batch(cmds...)
 			}
 			// Non-interactive: if an image from the final chunk is still being
-			// fetched, wait for it (a mathReadyMsg will quit once it lands) so the
-			// printed output isn't missing an equation.
+			// fetched, wait for it (an imageReadyMsg will quit once it lands) so the
+			// printed output isn't missing an image.
 			m.streamDone = true
-			if m.math != nil && m.math.pending() {
+			if m.images != nil && m.images.pending() {
 				return m, tea.Batch(cmds...)
 			}
 			m.state = doneState
@@ -433,14 +458,14 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.yankFlashIdx = -1
 		m.reRenderConversation()
 		return m, nil
-	case mathReadyMsg:
-		// A background formula render finished; re-render so the now-cached
+	case imageReadyMsg:
+		// A background image render finished; re-render so the now-cached
 		// image is transmitted and its placeholder grid appears.
 		if !m.interactive {
 			m.reRenderOutput()
 			// If the stream is over and all images are in, quit and let the
 			// final output (with images) print.
-			if m.streamDone && (m.math == nil || !m.math.pending()) {
+			if m.streamDone && (m.images == nil || !m.images.pending()) {
 				m.state = doneState
 				return m, m.quit
 			}
@@ -511,7 +536,7 @@ func (m *Mods) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.glamViewport, cmd = m.glamViewport.Update(msg)
 		cmds = append(cmds, cmd)
 	}
-	if m.state == responseState {
+	if m.spinnerActive() {
 		var cmd tea.Cmd
 		m.responseSpinner, cmd = m.responseSpinner.Update(msg)
 		cmds = append(cmds, cmd)
@@ -626,7 +651,7 @@ func (m *Mods) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.glamViewport, cmd = m.glamViewport.Update(msg)
 		cmds = append(cmds, cmd)
-		if m.state == responseState {
+		if m.spinnerActive() {
 			var cmd2 tea.Cmd
 			m.responseSpinner, cmd2 = m.responseSpinner.Update(msg)
 			cmds = append(cmds, cmd2)
@@ -1023,22 +1048,62 @@ func newResponseSpinner(r *lipgloss.Renderer) spinner.Model {
 	return sp
 }
 
-func (m *Mods) placeSpinnerTopRight(view string) string {
+// spinnerActive reports whether the response spinner should animate: while a
+// response streams in, and while diagrams are still rendering.
+func (m *Mods) spinnerActive() bool {
+	return m.state == responseState || m.pendingDiagrams() > 0
+}
+
+// pendingDiagrams counts mermaid diagrams still being rendered.
+func (m *Mods) pendingDiagrams() int {
+	if m.images == nil {
+		return 0
+	}
+	return m.images.pendingDiagrams()
+}
+
+// diagramBlinkPeriod is how long the pending-diagrams label stays in each of
+// its two blink states.
+const diagramBlinkPeriod = 500 * time.Millisecond
+
+// statusBadge renders the top-right activity indicator: the spinner, preceded
+// by a blinking count of diagrams still rendering when there are any. The
+// blink needs no timer of its own: the spinner's ticks redraw the view several
+// times per blink period.
+func (m *Mods) statusBadge() string {
+	badge := m.responseSpinner.View()
+	if n := m.pendingDiagrams(); n > 0 {
+		label := "rendering 1 diagram"
+		if n > 1 {
+			label = fmt.Sprintf("rendering %d diagrams", n)
+		}
+		style := m.Styles.ImageLoading
+		if time.Now().UnixMilli()/diagramBlinkPeriod.Milliseconds()%2 == 1 {
+			style = m.Styles.ImageLoadingDim
+		}
+		badge = style.Render(label) + " " + badge
+	}
+	return badge
+}
+
+// placeStatusBadge overlays the status badge on the right of the view's first
+// line, truncating that line if needed to make room.
+func (m *Mods) placeStatusBadge(view string) string {
 	if m.width <= 0 {
 		return view
 	}
-	spinnerStr := m.responseSpinner.View()
-	spinnerWidth := lipgloss.Width(spinnerStr)
+	badge := m.statusBadge()
+	badgeWidth := lipgloss.Width(badge)
 	lines := strings.Split(view, "\n")
 	if len(lines) == 0 {
 		return view
 	}
 	firstLineWidth := lipgloss.Width(lines[0])
-	availableWidth := m.width - spinnerWidth
+	availableWidth := m.width - badgeWidth
 	if firstLineWidth <= availableWidth {
-		lines[0] = lines[0] + strings.Repeat(" ", availableWidth-firstLineWidth) + spinnerStr
+		lines[0] = lines[0] + strings.Repeat(" ", availableWidth-firstLineWidth) + badge
 	} else {
-		lines[0] = m.renderer.NewStyle().MaxWidth(availableWidth).Render(lines[0]) + spinnerStr
+		lines[0] = m.renderer.NewStyle().MaxWidth(availableWidth).Render(lines[0]) + badge
 	}
 	return strings.Join(lines, "\n")
 }
@@ -1060,7 +1125,7 @@ func (m *Mods) View() string {
 	case responseState:
 		if !m.Config.Raw && isOutputTTY() {
 			if m.height > 0 {
-				return m.placeSpinnerTopRight(m.glamViewport.View())
+				return m.placeStatusBadge(m.glamViewport.View())
 			}
 			return m.glamOutput
 		}
@@ -1096,6 +1161,10 @@ func (m *Mods) interactiveView() string {
 		if m.historyMode {
 			return m.padToTermHeight(trimViewportBottom(m.glamViewport.View()))
 		}
+		vp := trimViewportBottom(m.glamViewport.View())
+		if m.pendingDiagrams() > 0 {
+			vp = m.placeStatusBadge(vp)
+		}
 
 		// Use focused style when typing, dimmer when in browse mode
 		boxStyle := m.Styles.InputBoxFocused
@@ -1106,7 +1175,7 @@ func (m *Mods) interactiveView() string {
 		var sb strings.Builder
 		// Trim viewport padding so the textarea sits directly below
 		// conversation content instead of being pinned to the bottom.
-		if vp := trimViewportBottom(m.glamViewport.View()); vp != "" {
+		if vp != "" {
 			sb.WriteString(vp)
 			// When the last message is a highlighted assistant, the border
 			// bottom already separates content from the input box.
@@ -1132,7 +1201,7 @@ func (m *Mods) interactiveView() string {
 		return m.padToTermHeight(sb.String())
 
 	case responseState:
-		return m.padToTermHeight(m.placeSpinnerTopRight(trimViewportBottom(m.glamViewport.View())))
+		return m.padToTermHeight(m.placeStatusBadge(trimViewportBottom(m.glamViewport.View())))
 	}
 	return ""
 }
@@ -1317,7 +1386,7 @@ func (m *Mods) appendResponseToConversation() {
 	m.messageOffsets = append(m.messageOffsets, strings.Count(m.conversationContent, "\n"))
 	m.rawMessages = append(m.rawMessages, m.Output)
 	m.messageRoles = append(m.messageRoles, proto.RoleAssistant)
-	if glamRendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+	if glamRendered, ok := renderAssistantMarkdown(m.glam, m.images, m.Output); ok {
 		glamRendered = strings.TrimFunc(glamRendered, unicode.IsSpace)
 		glamRendered = strings.ReplaceAll(glamRendered, "\t", strings.Repeat(" ", tabWidth))
 		m.conversationContent += glamRendered + "\n\n"
@@ -1349,7 +1418,7 @@ func (m *Mods) reRenderStreamingOutput() {
 	if m.Output == "" {
 		return
 	}
-	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.images, m.Output); ok {
 		m.glamOutput = rendered
 	} else {
 		m.glamOutput = m.Output
@@ -1363,7 +1432,7 @@ func (m *Mods) reRenderStreamingOutput() {
 // reRenderConversation re-renders the entire conversation after a terminal resize or highlight change.
 func (m *Mods) reRenderConversation() {
 	content, offsets, rawMessages, roles := renderConversation(
-		m.messages, m.glam, m.math,
+		m.messages, m.glam, m.images,
 		m.Styles.UserMessage, m.Styles.UserMessageFocused,
 		m.Styles.AssistantMessageFocused,
 		m.width, m.currentMsgIdx, m.yankFlashIdx,
@@ -1386,7 +1455,7 @@ func (m *Mods) loadConversationHistory() {
 	}
 	m.messages = messages
 	content, offsets, rawMessages, roles := renderConversation(
-		messages, m.glam, m.math,
+		messages, m.glam, m.images,
 		m.Styles.UserMessage, m.Styles.UserMessageFocused,
 		m.Styles.AssistantMessageFocused,
 		m.width, -1, -1,
@@ -1816,7 +1885,7 @@ func (m *Mods) appendToOutput(s string) {
 		return
 	}
 
-	if rendered, ok := renderAssistantMarkdown(m.glam, m.math, m.Output); ok {
+	if rendered, ok := renderAssistantMarkdown(m.glam, m.images, m.Output); ok {
 		m.glamOutput = rendered
 	} else {
 		m.glamOutput = m.Output

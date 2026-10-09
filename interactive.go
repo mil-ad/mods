@@ -55,28 +55,27 @@ func renderUserMessage(content string, style lipgloss.Style, width int) string {
 }
 
 // renderAssistantMarkdown renders an assistant message to ANSI via glamour,
-// swapping block-math spans for kitty placeholder grids when math is non-nil.
+// swapping image blocks (block math, mermaid diagrams) for kitty placeholder
+// grids when images is non-nil.
 // Returns the rendered string and whether rendering succeeded (false falls back
 // to plain text at the call site). Callers apply their own whitespace trimming.
-func renderAssistantMarkdown(glam *glamour.TermRenderer, math *mathRenderer, content string) (string, bool) {
+func renderAssistantMarkdown(glam *glamour.TermRenderer, images *imageRenderer, content string) (string, bool) {
 	if glam == nil {
 		return "", false
 	}
 	renderContent := content
 	var grids map[int]string
-	if math != nil {
-		// Extract block math to sentinels before glamour (which has no math
-		// support), then swap in placeholder grids after.
-		processed, formulas := extractBlockMath(content)
-		renderContent = processed
-		grids = math.render(formulas)
+	if images != nil {
+		// Extract image blocks to sentinels before glamour (which supports
+		// neither math nor mermaid), then swap in placeholder grids after.
+		renderContent, grids = images.preprocess(content)
 	}
 	rendered, err := glam.Render(renderContent)
 	if err != nil {
 		return "", false
 	}
-	if math != nil {
-		rendered = substituteMath(rendered, grids)
+	if images != nil {
+		rendered = substituteImages(rendered, grids)
 	}
 	return rendered, true
 }
@@ -89,7 +88,7 @@ func renderAssistantMarkdown(glam *glamour.TermRenderer, math *mathRenderer, con
 func renderConversation(
 	messages []proto.Message,
 	glam *glamour.TermRenderer,
-	math *mathRenderer,
+	images *imageRenderer,
 	userStyle lipgloss.Style,
 	userStyleFocused lipgloss.Style,
 	assistantStyleFocused lipgloss.Style,
@@ -154,7 +153,7 @@ func renderConversation(
 
 			highlighted := vm.idx == highlightIdx
 			flashing := vm.idx == yankFlashIdx && yankFlashIdx >= 0
-			if glamRendered, ok := renderAssistantMarkdown(glam, math, vm.msg.Content); ok {
+			if glamRendered, ok := renderAssistantMarkdown(glam, images, vm.msg.Content); ok {
 				glamRendered = strings.TrimFunc(glamRendered, func(r rune) bool {
 					return r == '\n' || r == '\r' || r == ' ' || r == '\t'
 				})

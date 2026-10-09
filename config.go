@@ -30,56 +30,59 @@ const (
 )
 
 var help = map[string]string{
-	"api":               "OpenAI compatible REST API (openai, localai, anthropic, ...)",
-	"apis":              "Aliases and endpoints for OpenAI compatible REST API",
-	"http-proxy":        "HTTP proxy to use for API requests",
-	"model":             "Default model (gpt-3.5-turbo, gpt-4, ggml-gpt4all-j...)",
-	"ask-model":         "Ask which model to use via interactive prompt",
-	"max-input-chars":   "Default character limit on input to model",
-	"format":            "Ask for the response to be formatted as markdown unless otherwise set",
-	"format-text":       "Text to append when using the -f flag",
-	"role":              "System role to use",
-	"roles":             "List of predefined system messages that can be used as roles",
-	"list-roles":        "List the roles defined in your configuration file",
-	"prompt":            "Include the prompt from the arguments and stdin, truncate stdin to specified number of lines",
-	"prompt-args":       "Include the prompt from the arguments in the response",
-	"attachment":        "Attach a local image file or URL to the prompt (repeatable); only supported by vision-capable models",
-	"raw":               "Render output as raw text when connected to a TTY",
-	"quiet":             "Quiet mode (hide the spinner while loading and stderr messages for success)",
-	"help":              "Show help and exit",
-	"version":           "Show version and exit",
-	"max-retries":       "Maximum number of times to retry API calls",
-	"no-limit":          "Turn off the client-side limit on the size of the input into the model",
-	"word-wrap":         "Wrap formatted output at specific width (default is 80)",
-	"dynamic-width":     "Use terminal width for word wrap and re-render on resize",
-	"render-latex":      "Render LaTeX block math as images in kitty-compatible terminals",
-	"max-tokens":        "Maximum number of tokens in response",
-	"temp":              "Temperature (randomness) of results, from 0.0 to 2.0, -1.0 to disable",
-	"stop":              "Up to 4 sequences where the API will stop generating further tokens",
-	"topp":              "TopP, an alternative to temperature that narrows response, from 0.0 to 1.0, -1.0 to disable",
-	"topk":              "TopK, only sample from the top K options for each subsequent token, -1 to disable",
-	"fanciness":         "Your desired level of fanciness",
-	"status-text":       "Text to show while generating",
-	"settings":          "Open settings in your $EDITOR",
-	"dirs":              "Print the directories in which mods store its data",
-	"reset-settings":    "Backup your old settings file and reset everything to the defaults",
-	"continue":          "Continue from the last response or a given save title",
-	"continue-last":     "Continue from the last response",
-	"no-cache":          "Disables caching of the prompt/response",
-	"title":             "Saves the current conversation with the given title",
-	"list":              "Lists saved conversations",
-	"delete":            "Deletes one or more saved conversations with the given titles or IDs",
-	"delete-older-than": "Deletes all saved conversations older than the specified duration; valid values are " + strings.EnglishJoin(duration.ValidUnits(), true),
-	"show":              "Show a saved conversation with the given title or ID",
-	"theme":             "Theme to use in the forms; valid choices are charm, catppuccin, dracula, and base16",
-	"show-last":         "Show the last saved conversation",
-	"editor":            "Edit the prompt in your $EDITOR; only taken into account if no other args and if STDIN is a TTY",
-	"mcp-servers":       "MCP Servers configurations",
-	"mcp-disable":       "Disable specific MCP servers",
-	"mcp-list":          "List all available MCP servers",
-	"mcp-list-tools":    "List all available tools from enabled MCP servers",
-	"mcp-timeout":       "Timeout for MCP server calls, defaults to 15 seconds",
-	"interactive":       "Interactive mode: keep a conversation going in the TUI",
+	"api":                     "OpenAI compatible REST API (openai, localai, anthropic, ...)",
+	"apis":                    "Aliases and endpoints for OpenAI compatible REST API",
+	"http-proxy":              "HTTP proxy to use for API requests",
+	"model":                   "Default model (gpt-3.5-turbo, gpt-4, ggml-gpt4all-j...)",
+	"ask-model":               "Ask which model to use via interactive prompt",
+	"max-input-chars":         "Default character limit on input to model",
+	"format":                  "Ask for the response to be formatted as markdown unless otherwise set",
+	"format-text":             "Text to append when using the -f flag",
+	"role":                    "System role to use",
+	"roles":                   "List of predefined system messages that can be used as roles",
+	"list-roles":              "List the roles defined in your configuration file",
+	"prompt":                  "Include the prompt from the arguments and stdin, truncate stdin to specified number of lines",
+	"prompt-args":             "Include the prompt from the arguments in the response",
+	"attachment":              "Attach a local image file or URL to the prompt (repeatable); only supported by vision-capable models",
+	"raw":                     "Render output as raw text when connected to a TTY",
+	"quiet":                   "Quiet mode (hide the spinner while loading and stderr messages for success)",
+	"help":                    "Show help and exit",
+	"version":                 "Show version and exit",
+	"max-retries":             "Maximum number of times to retry API calls",
+	"no-limit":                "Turn off the client-side limit on the size of the input into the model",
+	"word-wrap":               "Wrap formatted output at specific width (default is 80)",
+	"dynamic-width":           "Use terminal width for word wrap and re-render on resize",
+	"render-latex":            "Render LaTeX block math as images in kitty-compatible terminals",
+	"render-mermaid":          "Render mermaid diagrams as images in kitty-compatible terminals",
+	"mermaid-ink-server":      "mermaid.ink server used to render mermaid diagrams, e.g. a self-hosted one",
+	"mermaid-ink-concurrency": "Maximum concurrent requests to the mermaid.ink server; match a self-hosted server's QUEUE_CONCURRENCY",
+	"max-tokens":              "Maximum number of tokens in response",
+	"temp":                    "Temperature (randomness) of results, from 0.0 to 2.0, -1.0 to disable",
+	"stop":                    "Up to 4 sequences where the API will stop generating further tokens",
+	"topp":                    "TopP, an alternative to temperature that narrows response, from 0.0 to 1.0, -1.0 to disable",
+	"topk":                    "TopK, only sample from the top K options for each subsequent token, -1 to disable",
+	"fanciness":               "Your desired level of fanciness",
+	"status-text":             "Text to show while generating",
+	"settings":                "Open settings in your $EDITOR",
+	"dirs":                    "Print the directories in which mods store its data",
+	"reset-settings":          "Backup your old settings file and reset everything to the defaults",
+	"continue":                "Continue from the last response or a given save title",
+	"continue-last":           "Continue from the last response",
+	"no-cache":                "Disables caching of the prompt/response",
+	"title":                   "Saves the current conversation with the given title",
+	"list":                    "Lists saved conversations",
+	"delete":                  "Deletes one or more saved conversations with the given titles or IDs",
+	"delete-older-than":       "Deletes all saved conversations older than the specified duration; valid values are " + strings.EnglishJoin(duration.ValidUnits(), true),
+	"show":                    "Show a saved conversation with the given title or ID",
+	"theme":                   "Theme to use in the forms; valid choices are charm, catppuccin, dracula, and base16",
+	"show-last":               "Show the last saved conversation",
+	"editor":                  "Edit the prompt in your $EDITOR; only taken into account if no other args and if STDIN is a TTY",
+	"mcp-servers":             "MCP Servers configurations",
+	"mcp-disable":             "Disable specific MCP servers",
+	"mcp-list":                "List all available MCP servers",
+	"mcp-list-tools":          "List all available tools from enabled MCP servers",
+	"mcp-timeout":             "Timeout for MCP server calls, defaults to 15 seconds",
+	"interactive":             "Interactive mode: keep a conversation going in the TUI",
 }
 
 // Model represents the LLM model used in the API call.
@@ -166,6 +169,7 @@ type Config struct {
 	WordWrap            int        `yaml:"word-wrap" env:"WORD_WRAP"`
 	DynamicWidth        bool       `yaml:"dynamic-width" env:"DYNAMIC_WIDTH"`
 	RenderLatex         bool       `yaml:"render-latex" env:"RENDER_LATEX"`
+	RenderMermaid       bool       `yaml:"render-mermaid" env:"RENDER_MERMAID"`
 	Fanciness           uint       `yaml:"fanciness" env:"FANCINESS"`
 	StatusText          string     `yaml:"status-text" env:"STATUS_TEXT"`
 	HTTPProxy           string     `yaml:"http-proxy" env:"HTTP_PROXY"`
@@ -203,6 +207,9 @@ type Config struct {
 	MCPDisable   []string
 	MCPTimeout   time.Duration `yaml:"mcp-timeout" env:"MCP_TIMEOUT"`
 
+	MermaidInkServer      string `yaml:"mermaid-ink-server" env:"MERMAID_INK_SERVER"`
+	MermaidInkConcurrency int    `yaml:"mermaid-ink-concurrency" env:"MERMAID_INK_CONCURRENCY"`
+
 	openEditor                                         bool
 	cacheReadFromID, cacheWriteToID, cacheWriteToTitle string
 }
@@ -222,6 +229,7 @@ func ensureConfig() (Config, error) {
 	// config file. A bool can't tell "absent" from "false" after unmarshal, so
 	// seed it before reading the file; yaml/env can still set it false.
 	c.RenderLatex = true
+	c.RenderMermaid = true
 	sp, err := xdg.ConfigFile(filepath.Join("mods", "mods.yml"))
 	if err != nil {
 		return c, modsError{err, "Could not find settings path."}
@@ -261,6 +269,12 @@ func ensureConfig() (Config, error) {
 
 	if c.WordWrap == 0 {
 		c.WordWrap = 80
+	}
+	if c.MermaidInkServer == "" {
+		c.MermaidInkServer = defaultMermaidInkServer
+	}
+	if c.MermaidInkConcurrency <= 0 {
+		c.MermaidInkConcurrency = defaultMermaidInkConcurrency
 	}
 
 	return c, nil
@@ -304,8 +318,11 @@ func defaultConfig() Config {
 			"markdown": defaultMarkdownFormatText,
 			"json":     defaultJSONFormatText,
 		},
-		MCPTimeout:  15 * time.Second,
-		RenderLatex: true,
+		MCPTimeout:            15 * time.Second,
+		RenderLatex:           true,
+		RenderMermaid:         true,
+		MermaidInkServer:      defaultMermaidInkServer,
+		MermaidInkConcurrency: defaultMermaidInkConcurrency,
 	}
 }
 

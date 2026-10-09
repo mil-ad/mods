@@ -166,10 +166,10 @@ var (
 			}
 			mods := newMods(cmd.Context(), stderrRenderer(), &config, db, cache)
 			p := tea.NewProgram(mods, opts...)
-			// Let background LaTeX renders nudge the program to re-render once
+			// Let background image renders nudge the program to re-render once
 			// their images are ready.
-			if mods.math != nil {
-				mods.math.notify = func() { p.Send(mathReadyMsg{}) }
+			if mods.images != nil {
+				mods.images.notify = func() { p.Send(imageReadyMsg{}) }
 			}
 			m, err := p.Run()
 			if err != nil {
@@ -326,6 +326,9 @@ func initFlags() {
 	flags.IntVar(&config.WordWrap, "word-wrap", config.WordWrap, stdoutStyles().FlagDesc.Render(help["word-wrap"]))
 	flags.BoolVar(&config.DynamicWidth, "dynamic-width", config.DynamicWidth, stdoutStyles().FlagDesc.Render(help["dynamic-width"]))
 	flags.BoolVar(&config.RenderLatex, "render-latex", config.RenderLatex, stdoutStyles().FlagDesc.Render(help["render-latex"]))
+	flags.BoolVar(&config.RenderMermaid, "render-mermaid", config.RenderMermaid, stdoutStyles().FlagDesc.Render(help["render-mermaid"]))
+	flags.StringVar(&config.MermaidInkServer, "mermaid-ink-server", config.MermaidInkServer, stdoutStyles().FlagDesc.Render(help["mermaid-ink-server"]))
+	flags.IntVar(&config.MermaidInkConcurrency, "mermaid-ink-concurrency", config.MermaidInkConcurrency, stdoutStyles().FlagDesc.Render(help["mermaid-ink-concurrency"]))
 	flags.Float64Var(&config.Temperature, "temp", config.Temperature, stdoutStyles().FlagDesc.Render(help["temp"]))
 	flags.StringArrayVar(&config.Stop, "stop", config.Stop, stdoutStyles().FlagDesc.Render(help["stop"]))
 	flags.Float64Var(&config.TopP, "topp", config.TopP, stdoutStyles().FlagDesc.Render(help["topp"]))
