@@ -51,6 +51,8 @@ no-limit: false
 word-wrap: 80
 # {{ index .Help "render-latex" }}
 render-latex: true
+# {{ index .Help "render-mermaid" }}
+render-mermaid: true
 # {{ index .Help "prompt-args" }}
 include-prompt-args: false
 # {{ index .Help "prompt" }}

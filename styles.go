@@ -31,7 +31,10 @@ type styles struct {
 	UserMessageFocused,
 	AssistantMessageFocused,
 	InputBoxFocused,
-	InputBoxBlurred lipgloss.Style
+	InputBoxBlurred,
+	ImageLoading,
+	ImageLoadingDim,
+	ImageFailed lipgloss.Style
 }
 
 func makeStyles(r *lipgloss.Renderer) (s styles) {
@@ -40,6 +43,11 @@ func makeStyles(r *lipgloss.Renderer) (s styles) {
 	s.CliArgs = r.NewStyle().Foreground(lipgloss.Color("#585858"))
 	s.Comment = r.NewStyle().Foreground(lipgloss.Color("#757575"))
 	s.CyclingChars = r.NewStyle().Foreground(lipgloss.Color("#FF87D7"))
+	// ImageLoading matches the response spinner; ImageLoadingDim is its faded
+	// counterpart, alternated with it to make the label blink.
+	s.ImageLoading = r.NewStyle().Foreground(lipgloss.Color("#6C50FF"))
+	s.ImageLoadingDim = r.NewStyle().Foreground(lipgloss.AdaptiveColor{Light: "#C4B9FF", Dark: "#3A2C85"})
+	s.ImageFailed = r.NewStyle().Foreground(lipgloss.Color("#757575"))
 	s.ErrorHeader = r.NewStyle().Foreground(lipgloss.Color("#F1F1F1")).Background(lipgloss.Color("#FF5F87")).Bold(true).Padding(0, 1).SetString("ERROR")
 	s.ErrorDetails = s.Comment
 	s.ErrPadding = r.NewStyle().Padding(0, horizontalEdgePadding)
