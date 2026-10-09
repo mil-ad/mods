@@ -11,15 +11,23 @@ import (
 )
 
 func TestMermaidURL(t *testing.T) {
-	got := mermaidURL("graph TD\n A-->B", true, 640)
+	got := mermaidURL(defaultMermaidInkServer, "graph TD\n A-->B", true, 640)
 	want := "https://mermaid.ink/img/Z3JhcGggVEQKIEEtLT5C?theme=dark&type=png&width=640"
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
+	// A self-hosted server, with or without a trailing slash.
+	for _, base := range []string{"http://localhost:3000", "http://localhost:3000/"} {
+		got := mermaidURL(base, "graph TD\n A-->B", false, 0)
+		want := "http://localhost:3000/img/Z3JhcGggVEQKIEEtLT5C?type=png"
+		if got != want {
+			t.Errorf("base %q: got %q, want %q", base, got, want)
+		}
+	}
 }
 
 // TestFetchMermaidPNGQueuesAndRetries checks the two defences against
-// mermaid.ink's per-client limit: requests never exceed mermaidMaxConcurrent at
+// mermaid.ink's queue limit: requests never exceed the configured concurrency at
 // once, and a busy (503) response is retried rather than failing the diagram.
 func TestFetchMermaidPNGQueuesAndRetries(t *testing.T) {
 	defer func(d time.Duration) { mermaidRetryDelay = d }(mermaidRetryDelay)
@@ -44,7 +52,7 @@ func TestFetchMermaidPNGQueuesAndRetries(t *testing.T) {
 	r := &imageRenderer{
 		ctx:          context.Background(),
 		client:       srv.Client(),
-		mermaidSlots: make(chan struct{}, mermaidMaxConcurrent),
+		mermaidSlots: make(chan struct{}, defaultMermaidInkConcurrency),
 	}
 	var wg sync.WaitGroup
 	for range 6 {
@@ -57,8 +65,8 @@ func TestFetchMermaidPNGQueuesAndRetries(t *testing.T) {
 		}()
 	}
 	wg.Wait()
-	if p := peak.Load(); p > mermaidMaxConcurrent {
-		t.Errorf("peak concurrency %d, want at most %d", p, mermaidMaxConcurrent)
+	if p := peak.Load(); p > defaultMermaidInkConcurrency {
+		t.Errorf("peak concurrency %d, want at most %d", p, defaultMermaidInkConcurrency)
 	}
 }
 
@@ -73,7 +81,7 @@ func TestFetchMermaidPNGDoesNotRetryBadSyntax(t *testing.T) {
 	r := &imageRenderer{
 		ctx:          context.Background(),
 		client:       srv.Client(),
-		mermaidSlots: make(chan struct{}, mermaidMaxConcurrent),
+		mermaidSlots: make(chan struct{}, defaultMermaidInkConcurrency),
 	}
 	if _, err := r.fetchMermaidPNG(srv.URL); err == nil {
 		t.Fatal("expected an error")

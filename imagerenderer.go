@@ -46,6 +46,11 @@ type imageRendererOptions struct {
 	darkTheme     bool   // style diagrams for a dark terminal background
 	wordWrap      int    // glamour's wrap width; images are scaled down to fit
 	failedNote    string // pre-styled line shown above a block that failed to render
+
+	// mermaid.ink server to render diagrams on; see mermaid.go for why
+	// concurrency matters.
+	mermaidServer      string
+	mermaidConcurrency int
 }
 
 // imageRenderer turns image blocks into transmitted kitty images and their
@@ -67,9 +72,11 @@ type imageRenderer struct {
 	mermaid      bool
 	darkTheme    bool
 	failedNote   string
-	// mermaidSlots limits concurrent mermaid.ink requests (see fetchMermaidPNG).
-	mermaidSlots chan struct{}
-	notify       func() // called when an async fetch completes
+	// mermaidServer is the mermaid.ink base URL; mermaidSlots limits concurrent
+	// requests to it (see fetchMermaidPNG).
+	mermaidServer string
+	mermaidSlots  chan struct{}
+	notify        func() // called when an async fetch completes
 
 	mu       sync.Mutex
 	maxCols  int // content width in cells; images are scaled down to fit
@@ -113,18 +120,21 @@ func newImageRenderer(ctx context.Context, opts imageRendererOptions) *imageRend
 		out = tty
 	}
 	r := &imageRenderer{
-		ctx:          ctx,
-		client:       &http.Client{Timeout: 15 * time.Second},
-		out:          out,
-		diac:         parseDiacritics(),
-		cellW:        cw,
-		cellH:        ch,
-		dpi:          dpiForCell(ch),
-		math:         opts.math,
-		mermaid:      opts.mermaid,
-		darkTheme:    opts.darkTheme,
-		failedNote:   opts.failedNote,
-		mermaidSlots: make(chan struct{}, mermaidMaxConcurrent),
+		ctx:           ctx,
+		client:        &http.Client{Timeout: 15 * time.Second},
+		out:           out,
+		diac:          parseDiacritics(),
+		cellW:         cw,
+		cellH:         ch,
+		dpi:           dpiForCell(ch),
+		math:          opts.math,
+		mermaid:       opts.mermaid,
+		darkTheme:     opts.darkTheme,
+		failedNote:    opts.failedNote,
+		mermaidServer: opts.mermaidServer,
+		// An unbuffered channel would block every fetch forever, so guard
+		// against a zero concurrency even though the config fills in a default.
+		mermaidSlots: make(chan struct{}, max(1, opts.mermaidConcurrency)),
 		nextID:       firstImageID,
 		cache:        map[string]*imageAsset{},
 		failed:       map[string]bool{},

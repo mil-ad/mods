@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 )
 
@@ -23,13 +24,16 @@ const mermaidTextPx = 20
 // larger diagrams, lower it for smaller.
 const mermaidFontScale = 1.0
 
-// mermaid.ink rejects more than a couple of concurrent requests from one client
-// with an immediate 503 (no Retry-After), so requests are queued through
-// mermaidMaxConcurrent slots, and a 503/429 is retried up to mermaidRetries
-// times with exponential backoff starting at mermaidRetryDelay.
+// mermaid.ink renders through a fixed-size queue (QUEUE_CONCURRENCY on a
+// self-hosted server) and answers an immediate 503 (no Retry-After) when it is
+// full. So requests are limited to the configured concurrency (see the
+// mermaid-ink-concurrency option; the public server accepts about
+// defaultMermaidInkConcurrency) and a 503/429 is retried up to mermaidRetries
+// times with exponential backoff from mermaidRetryDelay.
 const (
-	mermaidMaxConcurrent = 2
-	mermaidRetries       = 4
+	defaultMermaidInkServer      = "https://mermaid.ink"
+	defaultMermaidInkConcurrency = 2
+	mermaidRetries               = 4
 )
 
 // mermaidRetryDelay is a variable so tests can shorten it.
@@ -71,7 +75,7 @@ func (r *imageRenderer) fetchMermaidPNG(u string) ([]byte, error) {
 // requests: one at natural size to measure, then one at imageSupersample× the
 // on-screen width for sharpness.
 func (r *imageRenderer) buildMermaid(src string) (*imageAsset, error) {
-	natural, err := r.fetchMermaidPNG(mermaidURL(src, r.darkTheme, 0))
+	natural, err := r.fetchMermaidPNG(mermaidURL(r.mermaidServer, src, r.darkTheme, 0))
 	if err != nil {
 		return nil, err
 	}
@@ -93,7 +97,7 @@ func (r *imageRenderer) buildMermaid(src string) (*imageAsset, error) {
 		// or a tiny font.
 		return newImageAsset(natural, cfg, cols, rows), nil
 	}
-	png, err := r.fetchMermaidPNG(mermaidURL(src, r.darkTheme, target))
+	png, err := r.fetchMermaidPNG(mermaidURL(r.mermaidServer, src, r.darkTheme, target))
 	if err != nil {
 		return nil, err
 	}
@@ -104,8 +108,9 @@ func (r *imageRenderer) buildMermaid(src string) (*imageAsset, error) {
 	return newImageAsset(png, hiCfg, cols, rows), nil
 }
 
-// mermaidURL builds a mermaid.ink PNG URL for src. width 0 means natural size.
-func mermaidURL(src string, dark bool, width int) string {
+// mermaidURL builds a PNG URL for src on the mermaid.ink server at base. width 0
+// means natural size.
+func mermaidURL(base, src string, dark bool, width int) string {
 	q := url.Values{"type": {"png"}}
 	if dark {
 		q.Set("theme", "dark")
@@ -113,5 +118,5 @@ func mermaidURL(src string, dark bool, width int) string {
 	if width > 0 {
 		q.Set("width", fmt.Sprint(width))
 	}
-	return "https://mermaid.ink/img/" + base64.RawURLEncoding.EncodeToString([]byte(src)) + "?" + q.Encode()
+	return strings.TrimRight(base, "/") + "/img/" + base64.RawURLEncoding.EncodeToString([]byte(src)) + "?" + q.Encode()
 }

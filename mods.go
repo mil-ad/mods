@@ -203,6 +203,9 @@ func newMods(
 			darkTheme:  glamStyle != "light",
 			wordWrap:   wordWrap,
 			failedNote: m.Styles.ImageFailed.Render("✗ Couldn't render diagram"),
+
+			mermaidServer:      cfg.MermaidInkServer,
+			mermaidConcurrency: cfg.MermaidInkConcurrency,
 		})
 	}
 	return m
